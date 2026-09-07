@@ -33,4 +33,8 @@ await EngineChecks.Run(scratch);
 await ExecutionChecks.Run(scratch);
 await LocalEndpointChecks.Run(scratch);
 await WebDavChecks.Run(root);
+AccountChecks.Run(scratch);
+await WebDavTransferChecks.Run(scratch);
+await MonitorChecks.Run(scratch);
+PreferencesChecks.Run(scratch);
 Console.WriteLine("All checks passed.");

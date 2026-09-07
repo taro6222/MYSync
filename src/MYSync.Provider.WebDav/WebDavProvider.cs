@@ -11,7 +11,7 @@ public sealed class WebDavException(string message, HttpStatusCode? status = nul
 {
     public HttpStatusCode? Status { get; } = status;
 }
-public sealed class WebDavProvider : IProvider, IConfigurableProvider
+public sealed partial class WebDavProvider : IProvider, IConfigurableProvider, ITransferProvider
 {
     private readonly Func<HttpMessageHandler> handlerFactory;
     private HttpClient? client;
@@ -58,6 +58,13 @@ public sealed class WebDavProvider : IProvider, IConfigurableProvider
     }
     private static async Task<IReadOnlyList<RemoteFolder>> List(HttpClient client, Uri scope, Uri target, CancellationToken ct)
     {
+        var items = await Query(client, scope, target, ct);
+        return items.Where(x => x.IsFolder).Select(x => new RemoteFolder(x.Uri.AbsoluteUri.TrimEnd('/') + "/", x.Name, x.IsSelf ? null : target.AbsoluteUri))
+            .OrderBy(x => x.ParentId is null ? 0 : 1).ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+    }
+    private sealed record DavItem(Uri Uri, string Name, bool IsFolder, bool IsSelf);
+    private static async Task<IReadOnlyList<DavItem>> Query(HttpClient client, Uri scope, Uri target, CancellationToken ct)
+    {
         using var request = new HttpRequestMessage(new HttpMethod("PROPFIND"), target);
         request.Headers.Add("Depth", "1");
         request.Content = new StringContent("<d:propfind xmlns:d=\"DAV:\"><d:prop><d:resourcetype/><d:displayname/></d:prop></d:propfind>", Encoding.UTF8, "application/xml");
@@ -75,7 +82,7 @@ public sealed class WebDavProvider : IProvider, IConfigurableProvider
         var doc = await XDocument.LoadAsync(reader, LoadOptions.None, ct);
         XNamespace dav = "DAV:";
         if (doc.Root?.Name != dav + "multistatus") throw new WebDavException("WebDAV 목록 형식이 올바르지 않습니다.");
-        var result = new List<RemoteFolder>(); var seen = new HashSet<string>(StringComparer.Ordinal); var foundSelf = false;
+        var result = new List<DavItem>(); var seen = new HashSet<string>(StringComparer.Ordinal); var foundSelf = false;
         foreach (var entry in doc.Root.Elements(dav + "response"))
         {
             ct.ThrowIfCancellationRequested();
@@ -93,14 +100,12 @@ public sealed class WebDavProvider : IProvider, IConfigurableProvider
             if (types.Length != 1) throw new WebDavException("원격 항목 유형을 확인하지 못했습니다.");
             var isFolder = types[0].Element(dav + "collection") is not null;
             if (self) { if (!isFolder) throw new WebDavException("선택한 주소는 폴더가 아닙니다."); foundSelf = true; }
-            if (!isFolder) continue;
-            var canonical = resource.AbsoluteUri.TrimEnd('/') + "/";
             var name = props.Elements(dav + "displayname").FirstOrDefault()?.Value;
             if (string.IsNullOrWhiteSpace(name)) name = Uri.UnescapeDataString(resource.AbsolutePath.TrimEnd('/').Split('/').Last());
-            result.Add(new(canonical, string.IsNullOrWhiteSpace(name) ? "/" : name, self ? null : target.AbsoluteUri));
+            result.Add(new(resource, string.IsNullOrWhiteSpace(name) ? "/" : name, isFolder, self));
         }
         if (!foundSelf) throw new WebDavException("조회한 폴더 자체의 상태가 누락되었습니다.");
-        return result.OrderBy(x => x.ParentId is null ? 0 : 1).ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToArray();
+        return result;
     }
     private static bool Success(string? status)
     {

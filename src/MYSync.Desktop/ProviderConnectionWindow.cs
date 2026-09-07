@@ -20,7 +20,7 @@ public sealed class ProviderConnectionWindow : Window
             Control input = field.IsSecret ? new PasswordBox() : new TextBox { Text = field.DefaultValue };
             input.Padding = new Thickness(6); inputs.Add(field.Key, input); panel.Children.Add(input);
         }
-        panel.Children.Add(new TextBlock { Text = "이번 실행 중에만 연결합니다. 인증 정보는 디스크에 저장하지 않습니다.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 16, 0, 12) });
+        panel.Children.Add(new TextBlock { Text = "연결에 성공하면 이 Windows 사용자만 읽을 수 있도록 인증 정보를 암호화해 저장합니다.", TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 16, 0, 12) });
         var button = new Button { Content = "계정 연결", Background = new System.Windows.Media.SolidColorBrush(System.Windows.Media.Color.FromRgb(217, 41, 58)), Foreground = System.Windows.Media.Brushes.White, Padding = new Thickness(14, 8, 14, 8), IsDefault = true };
         button.Click += (_, _) =>
         {

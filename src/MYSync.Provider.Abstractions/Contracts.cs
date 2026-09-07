@@ -12,6 +12,11 @@ public interface IProvider : IDisposable
 }
 public static class ProviderContract { public const int Version = 1; }
 
+public interface ITransferProvider
+{
+    MYSync.Sync.Core.ISyncEndpoint OpenEndpoint(string remoteFolderId);
+}
+
 public sealed record ConnectionField(string Key, string Label, bool IsSecret = false, string DefaultValue = "");
 /// <summary>Optional v1 extension for session-only configuration. Never persist secret values in manifests.</summary>
 public interface IConfigurableProvider

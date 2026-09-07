@@ -42,7 +42,7 @@ public sealed class SyncExecutor(SyncJournal journal)
             }
             catch (OperationCanceledException)
             { journal.SetOutcome(job.Id, JobState.NeedsReconcile); throw; }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or HttpRequestException)
             { journal.SetOutcome(job.Id, JobState.NeedsReconcile); issues.Add(job.Operation.Path + ": " + ex.Message); }
         }
         var jobs = journal.ReadJobs(pair);

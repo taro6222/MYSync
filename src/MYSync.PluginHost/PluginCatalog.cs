@@ -48,12 +48,18 @@ public sealed class PluginCatalog : IDisposable
         foreach (var context in contexts) context.Unload();
         contexts.Clear();
     }
+    public IProvider CreateSession(string providerId)
+    {
+        var prototype = Providers.SingleOrDefault(x => x.Id == providerId) ?? throw new InvalidOperationException("Provider가 설치되지 않았습니다.");
+        return Activator.CreateInstance(prototype.GetType()) as IProvider ?? throw new InvalidOperationException("Provider 세션을 만들 수 없습니다.");
+    }
     private sealed class PluginContext(string path) : AssemblyLoadContext(isCollectible: true)
     {
         private readonly AssemblyDependencyResolver resolver = new(path);
         protected override Assembly? Load(AssemblyName name)
         {
             if (name.Name == typeof(IProvider).Assembly.GetName().Name) return typeof(IProvider).Assembly;
+            if (name.Name == typeof(MYSync.Sync.Core.ISyncEndpoint).Assembly.GetName().Name) return typeof(MYSync.Sync.Core.ISyncEndpoint).Assembly;
             var resolved = resolver.ResolveAssemblyToPath(name);
             return resolved is null ? null : LoadFromAssemblyPath(resolved);
         }

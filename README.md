@@ -1,45 +1,89 @@
 # MYSync
 
-Windows용 WebDAV·Google Drive 폴더 동기화 클라이언트 개발 프로젝트입니다.
+Windows에서 선택한 로컬 폴더와 원격 폴더를 양방향으로 동기화하는 WPF 앱입니다. MEGAsync와 유사한 동기화 목록·설정·트레이 사용 흐름을 목표로 개발 중입니다.
 
-현재 WPF 설정 화면, DLL 플러그인 로더, 변경 비교 엔진, 영속 작업 큐, 작업 실행기와 실제 로컬 파일 어댑터를 구현했습니다. WebDAV HTTPS/Basic 인증과 원격 폴더 탐색을 추가했습니다. 계정 영속 저장, WebDAV 전송, Google Drive 연결과 화면에서의 동기화 실행은 아직 구현 전입니다.
+현재 **WebDAV 연결과 실제 파일 전송, 자동 동기화, 트레이 실행**을 구현했습니다. Google Drive는 계획 단계입니다. 실제 서버와 Windows UI에 대한 수동 검증은 남아 있습니다.
 
-## 실행
+## 구현 상태
 
-.NET 10 SDK가 필요합니다. 이 작업 환경에는 `.tools/dotnet`에 설치했습니다.
+| 기능 | 현재 상태 |
+| --- | --- |
+| WebDAV | HTTPS/Basic 인증, 주소·포트 별도 입력, 원격 폴더 탐색 |
+| 계정 저장 | Windows DPAPI로 암호화, 저장 계정 재연결 |
+| 동기화 | 재귀 검사, 로컬·원격·기준 상태 비교, 업로드·다운로드·파일 삭제 |
+| 수동 실행 | 변경 미리보기, 실행·취소, 미완료 작업 재검사 |
+| 자동 실행 | 로컬 변경 감지, 기본 5분 재검사, 쌍별 시작·일시정지, 재시작 복원 |
+| 충돌·복구 | 파일 충돌 사본 보존, 로컬 교체·삭제 원본 보관, 불확실한 상태 차단 |
+| Windows 통합 | 닫기 시 트레이 유지, 트레이 종료, 로그인 자동 실행, 단일 인스턴스 |
+| Provider 확장 | DLL 플러그인 로드, 선택적 연결·전송 계약 |
+| Google Drive | 미구현 |
+| 원격 폴더 삭제·복구 관리 UI | 미구현 |
+
+자동 동기화는 파일 삭제도 반영합니다. 새 동기화 쌍은 일시정지 상태로 저장됩니다. 오류나 미해결 충돌이 발생하면 자동 실행을 중단하고 확인을 요청합니다.
+
+## 개발 환경과 실행
+
+Windows와 .NET 10 SDK가 필요합니다. 현재 개발 환경은 `.tools/dotnet`의 SDK를 사용합니다.
 
 ```powershell
 .\build.ps1 -Check
 .\build.ps1 -Run
 ```
 
-빌드 스크립트는 샘플 및 WebDAV 플러그인을 앱 출력의 `plugins`에 배치합니다. 앱에서 샘플 Provider, 로컬 폴더, 샘플 원격 폴더를 선택하면 동기화 쌍을 저장합니다. 설정은 `%LOCALAPPDATA%/MYSync/settings.db`에 저장되고 재시작 시 복원됩니다. 현재 UI는 설정만 저장하며 선택한 폴더의 파일을 변경하지 않습니다.
+빌드 스크립트는 Sample·WebDAV 플러그인을 앱 출력에 배치합니다. `-Check`는 독립 실행형 통합 검증을 실행하며, 테스트 파일은 `.tools/checks`에 격리합니다.
 
-`-Check`는 `.tools/checks` 아래 격리된 폴더에서 기존 통합 검증과 실제 디스크 왕복 전송·교체·삭제 보관·충돌 보존 검증을 실행합니다.
+앱의 **동기화 추가**에서 WebDAV 계정을 연결하고 로컬·원격 폴더를 선택합니다. 주소와 포트를 따로 입력하며 기본 포트는 443입니다. 저장 후 동기화 목록에서 **검사·실행** 또는 자동 시작을 선택합니다. Sample Provider는 탐색·플러그인 검증용이며 실제 전송은 지원하지 않습니다.
+
+## 테스트용 EXE
+
+```powershell
+.\publish.ps1
+```
+
+배포 위치는 `build/win-x64`입니다.
+
+```text
+win-x64/
+  MYSync.Desktop.exe
+  TEST-GUIDE.md
+  plugins/
+    Sample/
+    WebDav/
+```
+
+.NET 런타임은 압축된 단일 EXE에 포함됩니다. 외부 Provider를 로드하므로 `plugins` 폴더도 함께 배포해야 합니다. 일부 네이티브 구성 요소는 실행 시 추출됩니다. 생성된 `build`는 Git에서 제외합니다. 기존 배포는 새 빌드 교체 시 `.tools/publish-backups`에 보관하며, 배포 EXE가 실행 중이면 교체를 중단합니다.
 
 ## 구조
 
-- `src/MYSync.Desktop`: WPF 화면과 바인딩 모델
-- `src/MYSync.Provider.Abstractions`: 초기 플러그인 계약
-- `src/MYSync.PluginHost`: 플러그인 검증·로드
-- `src/MYSync.Provider.Sample`: 로드 검증용 DLL
-- `src/MYSync.Provider.WebDav`: HTTPS/Basic 연결과 PROPFIND 원격 폴더 탐색
-- `src/MYSync.Sync.Core`: 동기화 모델, 3자 비교, 전송 엔드포인트 계약
-- `src/MYSync.Sync.Infrastructure`: SQLite 상태·큐, 재귀 검사, 실행기, 로컬 파일 어댑터
-- `tests/MYSync.Checks`: 독립 실행형 통합 검증
+| 경로 | 역할 |
+| --- | --- |
+| `src/MYSync.Desktop` | WPF 화면, 계정·동기화 실행 흐름, 트레이·시작 등록 |
+| `src/MYSync.Provider.Abstractions` | Provider 계약 |
+| `src/MYSync.PluginHost` | 플러그인 검증·로드, 독립 세션 생성 |
+| `src/MYSync.Provider.Sample` | 플러그인 탐색 검증용 구현 |
+| `src/MYSync.Provider.WebDav` | WebDAV 탐색·검사·조건부 전송 |
+| `src/MYSync.Sync.Core` | 동기화 모델, 3자 비교, 엔드포인트 계약 |
+| `src/MYSync.Sync.Infrastructure` | SQLite 저장소·작업 큐, 로컬 파일 보존, 실행기·변경 감지 |
+| `tests/MYSync.Checks` | 독립 실행형 통합 검증 |
 
-플러그인 계약 v1은 기반 검증용으로 폴더 목록만 포함합니다. 선택적 IConfigurableProvider 계약으로 세션 연결을 지원합니다. 엔진의 전송 계약을 플러그인에 연결하고 계정 영속 저장을 추가하는 작업이 남아 있습니다. 현재 플러그인은 신뢰하는 코드만 설치해야 하며 보안 샌드박스가 아닙니다.
+계약 v1의 `IProvider`는 기본 정보와 폴더 탐색을 제공합니다. 선택적 `IConfigurableProvider`는 연결을, `ITransferProvider`는 전송 엔드포인트 생성을 담당합니다. Provider.Abstractions와 Sync.Core 어셈블리는 호스트와 공유합니다. 플러그인 폴더를 추가한 뒤 앱을 재시작하는 방식이며, 플러그인은 호스트 권한으로 실행되는 신뢰된 코드여야 합니다.
 
-## 로컬 파일 보존
+## 데이터와 현재 제약
 
-LocalEndpoint는 파일 교체·삭제 시 원본을 동기화 루트 밖의 같은 볼륨에 보관합니다. 완료를 확인하지 못한 복구 기록이 있으면 검사와 쓰기를 차단합니다. 복구 UI와 보존 기간 관리는 아직 구현 전입니다. 자세한 동작과 한계는 `docs/local-recovery.md`, 개발 이력은 `docs/development-progress.md`를 참고하세요.
+- `%LOCALAPPDATA%/MYSync/settings.db`: 동기화 쌍과 DPAPI 암호화 계정.
+- `%LOCALAPPDATA%/MYSync/journals/{pairId}.db`: 기준 상태와 영속 작업 큐.
+- `%LOCALAPPDATA%/MYSync/preferences.json`: 트레이 닫기 설정.
+- 로컬 루트의 형제 경로 `.MYSync-recovery/{pairId}`: 교체·삭제 전 원본과 복구 기록.
 
-## WebDAV 탐색
+현재 WebDAV는 HTTP, 자동 리디렉션, Digest/OAuth 인증을 지원하지 않습니다. 파일 교체·삭제에는 서버의 강한 ETag와 조건부 요청 지원이 필요합니다. 원격 폴더 삭제는 안전한 조건부 삭제를 보장할 수 없어 차단합니다. 원격 휴지통·버전 보존은 보장하지 않습니다.
 
-앱에서 WebDAV → 계정 연결 → HTTPS 폴더 주소·사용자 이름·비밀번호 입력 순서로 연결합니다. 연결 후 원격 목록에서 하위 폴더를 선택해 열거나 연결 루트로 돌아갈 수 있습니다. 목록 첫 항목은 현재 폴더입니다.
+원격 파일을 내려받아 해시를 비교하고 실행 전 다시 검사하므로 대규모 폴더에서는 비용이 큽니다. 복구 기록 확인·충돌 해결 UI, 계정 편집·삭제, 상세 전송률 표시, 자동 재시도는 후속 개발 대상입니다.
 
-현재 연결 정보는 메모리에만 유지하며 재시작 후 다시 입력해야 합니다. 계정과 동기화 쌍을 안정적으로 연결하는 저장 구조가 구현되기 전까지 WebDAV 쌍 저장을 막아 두었습니다. 연결은 읽기 권한만 확인하며 쓰기 권한을 검증하지 않습니다. HTTP·자동 리디렉션·Digest/OAuth 인증은 현재 지원하지 않습니다.
+## 문서
 
-## 테스트용 EXE 빌드
-
-`./publish.ps1`로 Windows x64 런타임 포함 배포를 생성합니다. 실행 파일은 `build/win-x64/MYSync.Desktop.exe`입니다. 플러그인과 런타임 DLL이 필요하므로 폴더 전체를 유지하세요. 수동 테스트 범위는 `docs/manual-test.md`에 정리했습니다. 생성된 build 폴더는 Git 추적에서 제외합니다.
+- [개발 핸드오프](docs/HANDOFF.md): 현재 코드, 검증 범위, 다음 작업
+- [수동 테스트 가이드](docs/manual-test.md)
+- [개발 계획](docs/development-plan.md) · [개발 이력](docs/development-progress.md)
+- [계정 저장](docs/account-storage.md) · [자동 동기화](docs/automatic-sync.md)
+- [WebDAV 전송](docs/webdav-transfer.md) · [로컬 복구](docs/local-recovery.md)
+- [트레이와 로그인 자동 실행](docs/tray-and-startup.md)
