@@ -54,6 +54,15 @@ internal static class WebDavChecks
             using var failed = new WebDavProvider(() => new Handler(_ => Xml(xml)));
             await Reject(() => failed.ConnectAsync(settings, default));
         }
+        using var customPort = new WebDavProvider(() => new Handler(request =>
+        {
+            Check(request.RequestUri!.Port == 5006 && request.RequestUri.Scheme == "https", "custom port not used");
+            return Xml(List(Item("/root/")));
+        }));
+        await customPort.ConnectAsync(new Dictionary<string,string>(settings) { ["url"] = "dav.example.test/root/", ["port"] = "5006" }, default);
+        foreach (var invalidPort in new[] { "0", "65536", "abc", "-1" })
+            await Reject(() => customPort.ConnectAsync(new Dictionary<string,string>(settings) { ["port"] = invalidPort }, default));
+        Console.WriteLine("PASS: hostname address, custom HTTPS port and invalid port validation");
         Console.WriteLine("PASS: WebDAV auth, nested/unicode folders, scope validation, partial errors, redirects, malformed XML and DTD rejection");
         using var catalog = new PluginCatalog();
         catalog.Load(Path.Combine(root, "src", "MYSync.Desktop", "bin", "Debug", "net10.0-windows", "plugins"));
@@ -61,3 +70,4 @@ internal static class WebDavChecks
         Console.WriteLine("PASS: WebDAV plugin dynamically loaded alongside sample");
     }
 }
+

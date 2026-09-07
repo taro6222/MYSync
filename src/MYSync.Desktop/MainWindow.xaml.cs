@@ -30,6 +30,7 @@ public partial class MainWindow : Window
         else if (model.Providers.Count == 0) StatusText.Text = "로드된 Provider가 없습니다. plugins 폴더에 설치하고 재시작하세요.";
         Closed += (_, _) => catalog.Dispose();
     }
+    private void ShowAdd(object sender, RoutedEventArgs e) => MainTabs.SelectedIndex = 1;
     private void ChooseLocal(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFolderDialog();
@@ -87,7 +88,7 @@ public partial class MainWindow : Window
         try
         {
             var pair = new SyncPair(Guid.NewGuid(), p.Id, path, folder.Id, folder.Name, true);
-            store.Save(pair); model.Pairs.Add(pair);
+            store.Save(pair); model.Pairs.Add(pair); MainTabs.SelectedIndex = 0;
             StatusText.Text = "저장했습니다. 앱 재시작 후 복원됩니다. 실제 전송은 아직 지원하지 않습니다.";
         }
         catch (Exception ex) { StatusText.Text = "저장 실패: " + ex.Message; }
@@ -99,3 +100,4 @@ public partial class MainWindow : Window
         return a.Equals(b, StringComparison.OrdinalIgnoreCase) || a.StartsWith(b + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || b.StartsWith(a + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 }
+

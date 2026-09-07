@@ -22,15 +22,24 @@ public sealed class WebDavProvider : IProvider, IConfigurableProvider
     public string DisplayName => "WebDAV";
     public ProviderCapabilities Capabilities => ProviderCapabilities.None;
     public bool IsConnected => client is not null;
-    public IReadOnlyList<ConnectionField> ConnectionFields => [new("url", "WebDAV 폴더 주소 (HTTPS)"), new("username", "사용자 이름"), new("password", "비밀번호 / 앱 비밀번호", true)];
+    public IReadOnlyList<ConnectionField> ConnectionFields => [new("url", "서버 주소 (예: nas.example.com/webdav/)"), new("port", "포트", DefaultValue: "443"), new("username", "사용자 이름"), new("password", "비밀번호 / 앱 비밀번호", true)];
     public async Task ConnectAsync(IReadOnlyDictionary<string, string> values, CancellationToken ct)
     {
-        if (!values.TryGetValue("url", out var address) || !Uri.TryCreate(address, UriKind.Absolute, out var uri) ||
+        values.TryGetValue("url", out var address);
+        address = address?.Trim();
+        if (!string.IsNullOrWhiteSpace(address) && !address.Contains("://", StringComparison.Ordinal)) address = "https://" + address;
+        if (!Uri.TryCreate(address, UriKind.Absolute, out var uri) ||
             uri.Scheme != Uri.UriSchemeHttps || uri.UserInfo.Length != 0 || uri.Query.Length != 0 || uri.Fragment.Length != 0)
             throw new ArgumentException("계정·쿼리·프래그먼트를 포함하지 않는 HTTPS 폴더 주소가 필요합니다.");
         if (!values.TryGetValue("username", out var username) || string.IsNullOrWhiteSpace(username) || username.Contains(':') || username.Any(char.IsControl) ||
             !values.TryGetValue("password", out var password) || password.Any(char.IsControl)) throw new ArgumentException("사용자 이름과 비밀번호를 확인하세요.");
-        var candidateRoot = new Uri(uri.AbsoluteUri.TrimEnd('/') + "/");
+        var builder = new UriBuilder(uri);
+        if (values.TryGetValue("port", out var portText) && !string.IsNullOrWhiteSpace(portText))
+        {
+            if (!int.TryParse(portText, out var port) || port is < 1 or > 65535) throw new ArgumentException("포트는 1~65535 사이의 숫자로 입력하세요.");
+            builder.Port = port;
+        }
+        var candidateRoot = new Uri(builder.Uri.AbsoluteUri.TrimEnd('/') + "/");
         var candidate = new HttpClient(handlerFactory()) { Timeout = TimeSpan.FromSeconds(30), MaxResponseContentBufferSize = 4 * 1024 * 1024 };
         candidate.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(username + ":" + password)));
         try
@@ -113,3 +122,4 @@ public sealed class WebDavProvider : IProvider, IConfigurableProvider
     }
     public void Dispose() { client?.Dispose(); client = null; root = null; }
 }
+
