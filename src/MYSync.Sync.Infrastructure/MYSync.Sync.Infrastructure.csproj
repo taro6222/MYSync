@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="../MYSync.Sync.Core/MYSync.Sync.Core.csproj" /><PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.11" /></ItemGroup></Project>

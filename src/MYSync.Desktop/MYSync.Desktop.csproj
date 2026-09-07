@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWPF>true</UseWPF></PropertyGroup><ItemGroup><ProjectReference Include="../MYSync.PluginHost/MYSync.PluginHost.csproj" /><ProjectReference Include="../MYSync.Sync.Infrastructure/MYSync.Sync.Infrastructure.csproj" /></ItemGroup></Project>

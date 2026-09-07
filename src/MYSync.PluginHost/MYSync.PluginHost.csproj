@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><ItemGroup><ProjectReference Include="../MYSync.Provider.Abstractions/MYSync.Provider.Abstractions.csproj" /></ItemGroup></Project>

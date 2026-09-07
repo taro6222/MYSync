@@ -1,0 +1,1 @@
+<Project Sdk="Microsoft.NET.Sdk"><PropertyGroup><OutputType>Exe</OutputType></PropertyGroup><ItemGroup><ProjectReference Include="../../src/MYSync.PluginHost/MYSync.PluginHost.csproj"/><ProjectReference Include="../../src/MYSync.Sync.Infrastructure/MYSync.Sync.Infrastructure.csproj"/></ItemGroup></Project>
