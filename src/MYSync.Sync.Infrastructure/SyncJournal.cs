@@ -4,6 +4,7 @@ using MYSync.Sync.Core;
 namespace MYSync.Sync.Infrastructure;
 public enum JobState { Pending, Running, NeedsReconcile, Completed, Applied }
 public sealed record JournalJob(long Id, Guid PairId, PlannedOperation Operation, JobState State);
+public sealed record ConflictResolution(long JobId, PlannedOperation Operation);
 public sealed class SyncJournal
 {
     private readonly string connectionString;
@@ -89,4 +90,74 @@ public sealed class SyncJournal
         cmd.Parameters.AddWithValue("$pair", pair.ToString()); cmd.Parameters.AddWithValue("$payload", JsonSerializer.Serialize(local.Entries)); cmd.Parameters.AddWithValue("$done", (int)JobState.Completed);
         cmd.ExecuteNonQuery(); tx.Commit();
     }
+
+    private static IReadOnlyList<SyncEntry> ReadBaseline(SqliteConnection c, SqliteTransaction tx, Guid pair)
+    {
+        using var cmd = c.CreateCommand(); cmd.Transaction = tx;
+        cmd.CommandText = "SELECT Payload FROM Baselines WHERE PairId=$pair"; cmd.Parameters.AddWithValue("$pair", pair.ToString());
+        return cmd.ExecuteScalar() is string value ? JsonSerializer.Deserialize<SyncEntry[]>(value)! : [];
+    }
+    /// <summary>
+    /// Records an explicit user decision for one unresolved file conflict by moving the discarded side into the baseline,
+    /// so the existing three-way comparison produces the intended transfer. Refuses directory/type conflicts, stale state,
+    /// and any resolution that would change the planned work for another path. Both conflict copies stay on disk.
+    /// </summary>
+    public ConflictResolution ResolveConflict(Guid pair, long jobId, ScanResult local, ScanResult remote, bool keepLocal)
+    {
+        if (!local.IsComplete || !remote.IsComplete) throw new InvalidOperationException("불완전한 검사 결과로는 충돌을 해결할 수 없습니다.");
+        using var c = Open(); using var tx = c.BeginTransaction();
+        JournalJob job;
+        using (var read = c.CreateCommand())
+        {
+            read.Transaction = tx; read.CommandText = "SELECT Id,Payload,State FROM Jobs WHERE Id=$id AND PairId=$pair";
+            read.Parameters.AddWithValue("$id", jobId); read.Parameters.AddWithValue("$pair", pair.ToString());
+            using var reader = read.ExecuteReader();
+            if (!reader.Read()) throw new InvalidOperationException("충돌 작업을 찾을 수 없습니다.");
+            job = new(reader.GetInt64(0), pair, JsonSerializer.Deserialize<PlannedOperation>(reader.GetString(1))!, (JobState)reader.GetInt32(2));
+        }
+        var op = job.Operation;
+        if (job.State != JobState.NeedsReconcile || op.Action != SyncAction.Conflict) throw new InvalidOperationException("미해결 충돌만 해결할 수 있습니다.");
+        if (op.ExpectedLocal?.Kind == EntryKind.Directory || op.ExpectedRemote?.Kind == EntryKind.Directory) throw new InvalidOperationException("폴더·유형 충돌은 이 화면에서 해결하지 않습니다.");
+        var currentLocal = local.Entries.SingleOrDefault(x => string.Equals(x.Path, op.Path, StringComparison.OrdinalIgnoreCase));
+        var currentRemote = remote.Entries.SingleOrDefault(x => string.Equals(x.Path, op.Path, StringComparison.OrdinalIgnoreCase));
+        if (currentLocal != op.ExpectedLocal || currentRemote != op.ExpectedRemote) throw new InvalidOperationException("충돌 항목이 검사 이후 변경되었습니다. 다시 검사하세요.");
+        if (keepLocal ? currentLocal is null : currentRemote is null) throw new InvalidOperationException("보존하도록 선택한 항목이 없습니다.");
+        var previous = ReadBaseline(c, tx, pair);
+        var baseline = previous.Where(x => !string.Equals(x.Path, op.Path, StringComparison.OrdinalIgnoreCase)).ToList();
+        var discarded = keepLocal ? currentRemote : currentLocal;
+        if (discarded is not null)
+        {
+            baseline.Add(discarded);
+            for (var parent = op.Path; parent.Contains('/');)
+            {
+                parent = parent[..parent.LastIndexOf('/')];
+                if (!baseline.Any(x => string.Equals(x.Path, parent, StringComparison.OrdinalIgnoreCase))) baseline.Add(new(parent, EntryKind.Directory, null));
+            }
+        }
+        var after = SyncPlanner.Compare(local, remote, baseline);
+        if (!after.CanExecute) throw new InvalidOperationException("해결 후 계획을 만들 수 없습니다: " + string.Join(" / ", after.Errors));
+        if (!Signature(SyncPlanner.Compare(local, remote, previous), op.Path).SequenceEqual(Signature(after, op.Path), StringComparer.Ordinal))
+            throw new InvalidOperationException("이 해결이 다른 경로의 작업까지 바꿉니다. 중단합니다.");
+        var resolved = after.Operations.SingleOrDefault(x => string.Equals(x.Path, op.Path, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException("해결 후 실행할 작업이 없습니다.");
+        var expected = keepLocal ? resolved.Action is SyncAction.Upload or SyncAction.DeleteRemote : resolved.Action is SyncAction.Download or SyncAction.DeleteLocal;
+        if (!expected) throw new InvalidOperationException("선택한 방향과 다른 작업이 계산되었습니다: " + resolved.Action);
+        using (var write = c.CreateCommand())
+        {
+            write.Transaction = tx;
+            write.CommandText = "INSERT INTO Baselines VALUES($pair,$payload) ON CONFLICT(PairId) DO UPDATE SET Payload=$payload;" +
+                " UPDATE Jobs SET State=$done WHERE Id=$id AND State=$reconcile;" +
+                " INSERT INTO Jobs(PairId,Payload,State) VALUES($pair,$job,$pending);";
+            write.Parameters.AddWithValue("$pair", pair.ToString()); write.Parameters.AddWithValue("$payload", JsonSerializer.Serialize(baseline));
+            write.Parameters.AddWithValue("$done", (int)JobState.Completed); write.Parameters.AddWithValue("$id", jobId);
+            write.Parameters.AddWithValue("$reconcile", (int)JobState.NeedsReconcile);
+            write.Parameters.AddWithValue("$job", JsonSerializer.Serialize(resolved)); write.Parameters.AddWithValue("$pending", (int)JobState.Pending);
+            write.ExecuteNonQuery();
+        }
+        tx.Commit();
+        return new(jobId, resolved);
+    }
+    private static string[] Signature(SyncPlan plan, string path) => plan.Operations
+        .Where(x => !string.Equals(x.Path, path, StringComparison.OrdinalIgnoreCase))
+        .Select(x => x.Path + "|" + x.Action).Order(StringComparer.Ordinal).ToArray();
 }

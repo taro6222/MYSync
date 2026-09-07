@@ -17,7 +17,8 @@ Windows에서 선택한 로컬 폴더와 원격 폴더를 양방향으로 동기
 | Windows 통합 | 닫기 시 트레이 유지, 트레이 종료, 로그인 자동 실행, 단일 인스턴스 |
 | Provider 확장 | DLL 플러그인 로드, 선택적 연결·전송 계약 |
 | Google Drive | 미구현 |
-| 원격 폴더 삭제·복구 관리 UI | 미구현 |
+| 충돌·복구 확인 | 복구 기록 판정·보관본 복원·확인 처리, 파일 충돌 결정 |
+| 원격 폴더 삭제 | 미구현 |
 
 자동 동기화는 파일 삭제도 반영합니다. 새 동기화 쌍은 일시정지 상태로 저장됩니다. 오류나 미해결 충돌이 발생하면 자동 실행을 중단하고 확인을 요청합니다.
 
@@ -77,7 +78,7 @@ win-x64/
 
 현재 WebDAV는 HTTP, 자동 리디렉션, Digest/OAuth 인증을 지원하지 않습니다. 파일 교체·삭제에는 서버의 강한 ETag와 조건부 요청 지원이 필요합니다. 원격 폴더 삭제는 안전한 조건부 삭제를 보장할 수 없어 차단합니다. 원격 휴지통·버전 보존은 보장하지 않습니다.
 
-원격 파일을 내려받아 해시를 비교하고 실행 전 다시 검사하므로 대규모 폴더에서는 비용이 큽니다. 복구 기록 확인·충돌 해결 UI, 계정 편집·삭제, 상세 전송률 표시, 자동 재시도는 후속 개발 대상입니다.
+원격 파일을 내려받아 해시를 비교하고 실행 전 다시 검사하므로 대규모 폴더에서는 비용이 큽니다. 계정 편집·삭제, 상세 전송률 표시, 자동 재시도는 후속 개발 대상입니다.
 
 ## 문서
 
@@ -85,5 +86,5 @@ win-x64/
 - [수동 테스트 가이드](docs/manual-test.md)
 - [개발 계획](docs/development-plan.md) · [개발 이력](docs/development-progress.md)
 - [계정 저장](docs/account-storage.md) · [자동 동기화](docs/automatic-sync.md)
-- [WebDAV 전송](docs/webdav-transfer.md) · [로컬 복구](docs/local-recovery.md)
+- [WebDAV 전송](docs/webdav-transfer.md) · [로컬 복구](docs/local-recovery.md) · [충돌·복구 확인](docs/conflict-recovery.md)
 - [트레이와 로그인 자동 실행](docs/tray-and-startup.md)

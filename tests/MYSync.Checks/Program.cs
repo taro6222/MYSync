@@ -37,4 +37,5 @@ AccountChecks.Run(scratch);
 await WebDavTransferChecks.Run(scratch);
 await MonitorChecks.Run(scratch);
 PreferencesChecks.Run(scratch);
+await RecoveryChecks.Run(scratch);
 Console.WriteLine("All checks passed.");

@@ -117,21 +117,29 @@ public partial class MainWindow : Window
         }
     }
     private void ShowAdd(object sender, RoutedEventArgs e) => MainTabs.SelectedIndex = 1;
-    private void OpenSync(object sender, RoutedEventArgs e)
+    private void OpenSync(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new SyncRunWindow(pair, provider, accountStore, recovery, journalPath));
+    private void OpenResolve(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new ResolveWindow(pair, provider, accountStore, recovery, journalPath));
+    private void OpenPairWindow(object sender, Func<SyncPair, IProvider, string, string, Window> create)
     {
         if ((sender as FrameworkElement)?.DataContext is not SyncPair pair) return;
-        if (autoRuns.ContainsKey(pair.Id)) { StatusText.Text = "자동 동기화를 일시정지한 후 수동 검사를 여세요."; return; }
+        if (autoRuns.ContainsKey(pair.Id)) { StatusText.Text = "자동 동기화를 일시정지한 후 여세요."; return; }
         try
         {
             var provider = model.Providers.SingleOrDefault(x => x.Id == pair.ProviderId) ?? throw new InvalidOperationException("Provider가 설치되지 않았습니다.");
-            var parent = Directory.GetParent(pair.LocalPath)?.FullName ?? throw new InvalidOperationException("드라이브 전체 대신 하위 폴더를 선택하세요.");
-            var recovery = Path.Combine(parent, ".MYSync-recovery", pair.Id.ToString("N"));
-            if (model.Pairs.Any(x => Overlaps(x.LocalPath, recovery))) throw new InvalidOperationException("복구 보관함이 다른 동기화 폴더와 겹칩니다.");
+            var recovery = RecoveryPathFor(pair);
             var journalPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MYSync", "journals", pair.Id.ToString("N") + ".db");
-            new SyncRunWindow(pair, provider, accountStore, recovery, journalPath) { Owner = this }.ShowDialog();
+            var window = create(pair, provider, recovery, journalPath);
+            window.Owner = this; window.ShowDialog();
         }
         catch (Exception ex) { StatusText.Text = ex.Message; }
         finally { activeAccountId = null; RemoteBox.ItemsSource = null; }
+    }
+    private string RecoveryPathFor(SyncPair pair)
+    {
+        var parent = Directory.GetParent(pair.LocalPath)?.FullName ?? throw new InvalidOperationException("드라이브 전체 대신 하위 폴더를 선택하세요.");
+        var recovery = Path.Combine(parent, ".MYSync-recovery", pair.Id.ToString("N"));
+        if (model.Pairs.Any(x => Overlaps(x.LocalPath, recovery))) throw new InvalidOperationException("복구 보관함이 다른 동기화 폴더와 겹칩니다.");
+        return recovery;
     }
     private void ChooseLocal(object sender, RoutedEventArgs e)
     {
@@ -162,9 +170,7 @@ public partial class MainWindow : Window
         if (autoRuns.ContainsKey(pair.Id)) return;
         if (pair.AccountId is null) throw new InvalidOperationException("저장된 WebDAV 계정이 필요합니다.");
         var account = accountStore.List().SingleOrDefault(x => x.Id == pair.AccountId && x.ProviderId == pair.ProviderId) ?? throw new InvalidOperationException("저장 계정을 찾을 수 없습니다.");
-        var parent = Directory.GetParent(pair.LocalPath)?.FullName ?? throw new InvalidOperationException("하위 폴더를 선택하세요.");
-        var recovery = Path.Combine(parent, ".MYSync-recovery", pair.Id.ToString("N"));
-        if (model.Pairs.Any(x => Overlaps(x.LocalPath, recovery))) throw new InvalidOperationException("복구 보관함이 동기화 폴더와 겹칩니다.");
+        var recovery = RecoveryPathFor(pair);
         var runLock = new Mutex(false, "Local\\MYSync-pair-" + pair.Id.ToString("N"));
         bool acquired;
         try { acquired = runLock.WaitOne(0); } catch (AbandonedMutexException) { acquired = true; }
