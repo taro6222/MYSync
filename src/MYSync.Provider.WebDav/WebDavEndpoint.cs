@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Security.Cryptography;
 using MYSync.Sync.Core;
@@ -15,6 +16,9 @@ public sealed partial class WebDavProvider
     private sealed class DavEndpoint(HttpClient http, Uri scope) : ISyncEndpoint
     {
         private const string StagingPrefix = ".mysync-upload-";
+        // Skips re-downloading a file whose strong ETag and length are unchanged since we hashed it in this session.
+        // Advisory only: every read, replace and delete downloads and re-verifies the content before acting.
+        private readonly ConcurrentDictionary<string, (string ETag, long Length, string Hash)> hashes = new(StringComparer.Ordinal);
         private static FileStream Temp() => new(Path.Combine(Path.GetTempPath(), "mysync-" + Guid.NewGuid().ToString("N")), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None, 65536, FileOptions.Asynchronous | FileOptions.DeleteOnClose);
         private Uri Resolve(string relative)
         {
@@ -43,13 +47,19 @@ public sealed partial class WebDavProvider
                     }
                     else
                     {
-                        var (stream, hash, _) = await Download(item.Uri, ct);
-                        await stream.DisposeAsync(); entries.Add(new(path, EntryKind.File, hash));
+                        var strong = item.ETag is { } declared && !declared.StartsWith("W/", StringComparison.Ordinal) ? declared : null;
+                        if (strong is not null && hashes.TryGetValue(item.Uri.AbsoluteUri, out var known)
+                            && known.ETag == strong && (item.Length is null || item.Length == known.Length))
+                        { entries.Add(new(path, EntryKind.File, known.Hash)); continue; }
+                        var (stream, hash, tag, length) = await Download(item.Uri, ct);
+                        await stream.DisposeAsync();
+                        if (tag is not null) hashes[item.Uri.AbsoluteUri] = (tag, length, hash);
+                        entries.Add(new(path, EntryKind.File, hash));
                     }
                 }
             }
         }
-        private async Task<(FileStream Stream, string Hash, string? ETag)> Download(Uri uri, CancellationToken ct)
+        private async Task<(FileStream Stream, string Hash, string? ETag, long Length)> Download(Uri uri, CancellationToken ct)
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromMinutes(5));
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
@@ -61,7 +71,7 @@ public sealed partial class WebDavProvider
                 await response.Content.CopyToAsync(stream, timeout.Token); stream.Position = 0;
                 var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, timeout.Token)); stream.Position = 0;
                 var tag = response.Headers.ETag;
-                return (stream, hash, tag is { IsWeak: false } ? tag.ToString() : null);
+                return (stream, hash, tag is { IsWeak: false } ? tag.ToString() : null, stream.Length);
             }
             catch { await stream.DisposeAsync(); throw; }
         }
@@ -89,7 +99,7 @@ public sealed partial class WebDavProvider
         public async Task<Stream> OpenReadAsync(SyncEntry expected, CancellationToken ct)
         {
             if (expected.Kind != EntryKind.File || expected.ContentHash is null) throw new SyncPreconditionException("파일 해시가 필요합니다.");
-            var (stream, hash, _) = await Download(Resolve(expected.Path), ct);
+            var (stream, hash, _, _) = await Download(Resolve(expected.Path), ct);
             if (hash == expected.ContentHash) return stream;
             await stream.DisposeAsync(); throw new SyncPreconditionException("원격 파일이 변경되었습니다.");
         }
@@ -99,7 +109,7 @@ public sealed partial class WebDavProvider
             if (expected is not null)
             {
                 if (expected.Path != path || expected.Kind != EntryKind.File) throw new SyncPreconditionException("예상 파일 정보가 올바르지 않습니다.");
-                var (old, hash, tag) = await Download(destination, ct); await old.DisposeAsync();
+                var (old, hash, tag, _) = await Download(destination, ct); await old.DisposeAsync();
                 if (hash != expected.ContentHash) throw new SyncPreconditionException("업로드 대상이 변경되었습니다.");
                 destinationTag = StrongTag(tag);
             }
@@ -116,7 +126,7 @@ public sealed partial class WebDavProvider
                     using var response = await http.SendAsync(put, ct);
                     if (response.StatusCode != HttpStatusCode.Created) throw Failure("임시 업로드", response.StatusCode);
                 }
-                var (check, uploadedHash, tag) = await Download(temporary, ct); await check.DisposeAsync();
+                var (check, uploadedHash, tag, _) = await Download(temporary, ct); await check.DisposeAsync();
                 if (uploadedHash != sha256) throw new SyncPreconditionException("서버에 저장된 업로드 내용이 다릅니다.");
                 stagingTag = StrongTag(tag);
                 using var move = new HttpRequestMessage(new HttpMethod("MOVE"), temporary);
@@ -126,6 +136,7 @@ public sealed partial class WebDavProvider
                 if (destinationTag is not null) move.Headers.TryAddWithoutValidation("If", $"<{destination.AbsoluteUri}> ([{destinationTag}])");
                 using var moved = await http.SendAsync(move, ct);
                 if (moved.StatusCode is not (HttpStatusCode.Created or HttpStatusCode.NoContent)) throw Failure("업로드 게시", moved.StatusCode);
+                hashes.TryRemove(destination.AbsoluteUri, out _);
                 stagingTag = null;
             }
             catch
@@ -154,11 +165,12 @@ public sealed partial class WebDavProvider
         public async Task DeleteAsync(SyncEntry expected, CancellationToken ct)
         {
             if (expected.Kind == EntryKind.Directory) throw new SyncPreconditionException("WebDAV 폴더 삭제는 하위 변경 보호 구현 전까지 중단합니다.");
-            var target = Resolve(expected.Path); var (stream, hash, tag) = await Download(target, ct); await stream.DisposeAsync();
+            var target = Resolve(expected.Path); var (stream, hash, tag, _) = await Download(target, ct); await stream.DisposeAsync();
             if (hash != expected.ContentHash) throw new SyncPreconditionException("삭제 대상이 변경되었습니다.");
             using var request = new HttpRequestMessage(HttpMethod.Delete, target); request.Headers.TryAddWithoutValidation("If-Match", StrongTag(tag));
             using var response = await http.SendAsync(request, ct);
             if (response.StatusCode != HttpStatusCode.NoContent) throw Failure("파일 삭제", response.StatusCode);
+            hashes.TryRemove(target.AbsoluteUri, out _);
         }
     }
 }

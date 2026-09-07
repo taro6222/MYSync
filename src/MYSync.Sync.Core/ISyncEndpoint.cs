@@ -17,4 +17,15 @@ public interface ISyncEndpoint
     /// <summary>Conditional removal of the expected file or empty directory. Local removal retains the original outside the root and blocks scans on unverified results. Never recursively destroys contents.</summary>
     Task DeleteAsync(SyncEntry expected, CancellationToken cancellationToken);
 }
-public sealed class SyncPreconditionException(string message) : IOException(message);
+/// <summary>How a transfer failure should be treated. Only Transient may be retried without user action.</summary>
+public enum SyncFailureKind { Unknown, Transient, Authentication, Permission, Missing, Precondition }
+/// <summary>
+/// A transfer failure carrying its classification. Providers should throw this instead of a bare IOException
+/// so the engine never has to guess a retry policy from message text.
+/// </summary>
+public class SyncTransferException(string message, SyncFailureKind kind = SyncFailureKind.Unknown) : IOException(message)
+{
+    public SyncFailureKind Kind { get; } = kind;
+}
+/// <summary>The observed state did not match what the operation was planned against. Never retried blindly; the caller must re-scan.</summary>
+public sealed class SyncPreconditionException(string message) : SyncTransferException(message, SyncFailureKind.Precondition);

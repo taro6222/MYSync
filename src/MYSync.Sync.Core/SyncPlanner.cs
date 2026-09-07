@@ -2,14 +2,22 @@ namespace MYSync.Sync.Core;
 
 public enum EntryKind { File, Directory }
 public sealed record SyncEntry(string Path, EntryKind Kind, string? ContentHash);
-public sealed record ScanResult(IReadOnlyList<SyncEntry> Entries, IReadOnlyList<string> Errors)
+/// <summary>An item the scan identified but cannot synchronise. Reported, never silently skipped, and never treated as absent.</summary>
+public sealed record UnsupportedItem(string Path, string Reason);
+/// <summary>
+/// Errors mean the scan itself is incomplete and nothing may be planned from it.
+/// Unsupported means the scan succeeded and this one item cannot be handled; the rest still synchronises.
+/// </summary>
+public sealed record ScanResult(IReadOnlyList<SyncEntry> Entries, IReadOnlyList<string> Errors, IReadOnlyList<UnsupportedItem>? Unsupported = null)
 {
+    public IReadOnlyList<UnsupportedItem> Unsupported { get; init; } = Unsupported ?? [];
     public bool IsComplete => Errors.Count == 0;
 }
 public enum SyncAction { Upload, Download, DeleteLocal, DeleteRemote, Conflict }
 public sealed record PlannedOperation(string Path, SyncAction Action, SyncEntry? ExpectedLocal, SyncEntry? ExpectedRemote, string Reason);
-public sealed record SyncPlan(IReadOnlyList<PlannedOperation> Operations, IReadOnlyList<string> Errors)
+public sealed record SyncPlan(IReadOnlyList<PlannedOperation> Operations, IReadOnlyList<string> Errors, IReadOnlyList<UnsupportedItem>? Unsupported = null)
 {
+    public IReadOnlyList<UnsupportedItem> Unsupported { get; init; } = Unsupported ?? [];
     public bool CanExecute => Errors.Count == 0;
 }
 public static class SyncPlanner
@@ -19,9 +27,18 @@ public static class SyncPlanner
         var errors = local.Errors.Concat(remote.Errors).ToList();
         var l = Index(local.Entries, errors); var r = Index(remote.Entries, errors); var b = Index(baseline, errors);
         if (errors.Count > 0) return new([], errors);
+        // Items either side reported as unhandled, plus names this platform cannot represent.
+        var unsupported = new Dictionary<string, UnsupportedItem>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in local.Unsupported.Concat(remote.Unsupported)) unsupported.TryAdd(item.Path, item);
+        foreach (var path in l.Keys.Concat(r.Keys).Concat(b.Keys).Distinct(StringComparer.OrdinalIgnoreCase))
+            if (!Representable(path)) unsupported.TryAdd(path, new(path, "이 컴퓨터에서 사용할 수 없는 이름입니다."));
+        var blocked = unsupported.Keys.ToArray();
+        // A whole subtree is excluded: an unhandled folder was never scanned, so its children must not look deleted.
+        bool Excluded(string path) => blocked.Any(x => path.Equals(x, StringComparison.OrdinalIgnoreCase) || IsChild(path, x));
         var result = new List<PlannedOperation>();
         foreach (var path in l.Keys.Concat(r.Keys).Concat(b.Keys).Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal))
         {
+            if (Excluded(path)) continue;
             l.TryGetValue(path, out var left); r.TryGetValue(path, out var right); b.TryGetValue(path, out var previous);
             if (left is not null && right is not null && left.Path != right.Path)
             { Add(SyncAction.Conflict, "대소문자 경로 충돌"); continue; }
@@ -53,9 +70,20 @@ public static class SyncPlanner
             (x.ExpectedLocal?.Kind == EntryKind.Directory || x.ExpectedRemote?.Kind == EntryKind.Directory)).Select(x => x.Path).ToArray();
         result.RemoveAll(x => blockedParents.Any(p => IsChild(x.Path, p)));
         return new(result.OrderBy(x => x.Action is SyncAction.DeleteLocal or SyncAction.DeleteRemote ? 1 : 0)
-            .ThenBy(x => x.Action is SyncAction.DeleteLocal or SyncAction.DeleteRemote ? -x.Path.Count(c => c == '/') : x.Path.Count(c => c == '/')).ToArray(), []);
+            .ThenBy(x => x.Action is SyncAction.DeleteLocal or SyncAction.DeleteRemote ? -x.Path.Count(c => c == '/') : x.Path.Count(c => c == '/')).ToArray(),
+            [], unsupported.Values.OrderBy(x => x.Path, StringComparer.Ordinal).ToArray());
     }
     private static bool IsChild(string path, string parent) => path.StartsWith(parent + "/", StringComparison.OrdinalIgnoreCase);
+    /// <summary>Names Windows cannot store. Such an item is reported rather than planned, so one of them never blocks the pair.</summary>
+    private static bool Representable(string path) => path.Split('/').All(segment =>
+        segment.Length > 0 && !segment.EndsWith('.') && !segment.EndsWith(' ')
+        && segment.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 && !IsDeviceName(segment));
+    private static bool IsDeviceName(string name)
+    {
+        var stem = name.Split('.')[0].ToUpperInvariant();
+        return stem is "CON" or "PRN" or "AUX" or "NUL" or "CONIN$" or "CONOUT$" ||
+            stem.Length == 4 && (stem.StartsWith("COM", StringComparison.Ordinal) || stem.StartsWith("LPT", StringComparison.Ordinal)) && "123456789¹²³".Contains(stem[3]);
+    }
     private static bool Equivalent(SyncEntry? a, SyncEntry? b) => a is null ? b is null : b is not null && a.Kind == b.Kind &&
         (a.Kind == EntryKind.Directory || a.ContentHash is not null && b.ContentHash is not null && a.ContentHash == b.ContentHash);
     private static Dictionary<string, SyncEntry> Index(IEnumerable<SyncEntry> entries, List<string> errors)

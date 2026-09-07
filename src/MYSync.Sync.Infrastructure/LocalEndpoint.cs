@@ -14,6 +14,8 @@ public sealed class LocalEndpoint : ISyncEndpoint
     private readonly string root;
     private readonly string recovery;
     private readonly SemaphoreSlim gate;
+    // Advisory only. Writes and deletes always re-hash the real file before acting.
+    private readonly ConcurrentDictionary<string, FileFingerprint> fingerprints = new(StringComparer.OrdinalIgnoreCase);
     public LocalEndpoint(string root, string recoveryDirectory)
     {
         this.root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
@@ -33,7 +35,7 @@ public sealed class LocalEndpoint : ISyncEndpoint
             CheckAncestors(root); CheckAncestors(recovery);
             var pending = ReadRecovery().Where(x => !x.Verified).ToArray();
             if (pending.Length > 0) return new([], ["확인되지 않은 파일 작업이 있습니다. 복구 기록을 확인하세요: " + recovery]);
-            return await new LocalScanner().ScanAsync(root, ct);
+            return await new LocalScanner(fingerprints).ScanAsync(root, ct);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         { return new([], [ex.Message]); }

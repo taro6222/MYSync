@@ -1,22 +1,94 @@
 using MYSync.Sync.Core;
 namespace MYSync.Sync.Infrastructure;
 
-public sealed record ExecutionReport(bool Converged, IReadOnlyList<string> Issues);
+/// <summary>
+/// TransientOnly means every unfinished item failed for a reason the engine classified as temporary.
+/// Notices are items that were identified but cannot be synchronised; they never prevent convergence.
+/// </summary>
+public sealed record ExecutionReport(bool Converged, IReadOnlyList<string> Issues, bool TransientOnly = false, IReadOnlyList<string>? Notices = null)
+{
+    public IReadOnlyList<string> Notices { get; init; } = Notices ?? [];
+}
 
 public enum SyncPhase { Idle, Scanning, Transferring, Verifying, Attention }
 /// <summary>Advisory progress only. Never used to decide whether an operation completed.</summary>
 public sealed record SyncProgress(SyncPhase Phase, string Message, string? Path = null, SyncAction? Action = null, int Completed = 0, int Total = 0, long Bytes = 0);
 
-/// <summary>One sequential worker per sync pair. Call RecoverInterrupted before starting workers.</summary>
-public sealed class SyncExecutor(SyncJournal journal)
+/// <summary>Exponential backoff for temporary failures. Every attempt re-scans and re-plans, so a retry never repeats a side effect blindly.</summary>
+public sealed record RetryPolicy(int MaxAttempts = 3, TimeSpan? FirstDelay = null, TimeSpan? MaxDelay = null)
 {
+    public TimeSpan DelayFor(int attempt)
+    {
+        if (MaxAttempts < 1) throw new ArgumentOutOfRangeException(nameof(MaxAttempts));
+        var first = FirstDelay ?? TimeSpan.FromSeconds(2);
+        var ceiling = MaxDelay ?? TimeSpan.FromSeconds(30);
+        var scaled = first * Math.Pow(2, Math.Max(0, attempt - 1));
+        return scaled > ceiling ? ceiling : scaled;
+    }
+}
+
+/// <summary>One sequential worker per sync pair. Call RecoverInterrupted before starting workers.</summary>
+public sealed class SyncExecutor(SyncJournal journal, RetryPolicy? retryPolicy = null)
+{
+    private readonly RetryPolicy retry = retryPolicy ?? new RetryPolicy();
+
     public async Task<ExecutionReport> RunAsync(Guid pair, ISyncEndpoint local, ISyncEndpoint remote, CancellationToken ct = default, IProgress<SyncProgress>? progress = null)
     {
         var issues = new List<string>();
+        var permanent = 0;
         var queued = journal.ReadJobs(pair).Where(x => x.State is JobState.Pending or JobState.NeedsReconcile).ToArray();
         var total = queued.Length;
         var completed = 0;
         progress?.Report(new(SyncPhase.Scanning, total == 0 ? "실행할 작업이 없습니다." : $"{total}개 작업을 실행합니다.", Total: total));
+
+        // One attempt: re-scan, re-plan, verify the expected state, then act. Returns true for an unresolved conflict.
+        async Task<bool> Once(JournalJob job)
+        {
+            var op = job.Operation;
+            progress?.Report(new(SyncPhase.Scanning, "현재 상태 재확인 중", op.Path, op.Action, completed, total));
+            var left = await local.ScanAsync(ct); var right = await remote.ScanAsync(ct);
+            var plan = SyncPlanner.Compare(left, right, journal.ReadBaseline(pair));
+            if (!plan.CanExecute) throw new SyncPreconditionException(string.Join(" / ", plan.Errors));
+            var l = left.Entries.SingleOrDefault(x => x.Path == op.Path);
+            var r = right.Entries.SingleOrDefault(x => x.Path == op.Path);
+            if (op.Action != SyncAction.Conflict && OutcomeAlreadyPresent(op, l, r)) return false;
+            // Replanning protects directory deletion when a descendant changed after enqueue.
+            if (!plan.Operations.Any(x => x.Path == op.Path && x.Action == op.Action) || l != op.ExpectedLocal || r != op.ExpectedRemote)
+                throw new SyncPreconditionException("계획 이후 상태가 변경되었습니다. 새 계획이 필요합니다.");
+            var transferred = 0L;
+            void Sent(long count)
+            {
+                transferred += count;
+                progress?.Report(new(SyncPhase.Transferring, Describe(op.Action), op.Path, op.Action, completed, total, transferred));
+            }
+            progress?.Report(new(SyncPhase.Transferring, Describe(op.Action), op.Path, op.Action, completed, total));
+            switch (op.Action)
+            {
+                case SyncAction.Upload: await Copy(local, remote, op.ExpectedLocal!, op.Path, op.ExpectedRemote, ct, Sent); break;
+                case SyncAction.Download: await Copy(remote, local, op.ExpectedRemote!, op.Path, op.ExpectedLocal, ct, Sent); break;
+                case SyncAction.DeleteLocal: await local.DeleteAsync(op.ExpectedLocal!, ct); break;
+                case SyncAction.DeleteRemote: await remote.DeleteAsync(op.ExpectedRemote!, ct); break;
+                case SyncAction.Conflict: await PreserveConflict(job, local, remote, ct); return true;
+            }
+            return false;
+        }
+
+        async Task<bool> Attempt(JournalJob job)
+        {
+            for (var attempt = 1; ; attempt++)
+            {
+                try { return await Once(job); }
+                catch (Exception ex) when (attempt < retry.MaxAttempts && !ct.IsCancellationRequested && Handled(ex) && Classify(ex) == SyncFailureKind.Transient)
+                {
+                    var delay = retry.DelayFor(attempt);
+                    progress?.Report(new(SyncPhase.Attention,
+                        $"일시 오류로 {delay.TotalSeconds:0.#}초 후 재시도합니다 ({attempt}/{retry.MaxAttempts}): {ex.Message}",
+                        job.Operation.Path, job.Operation.Action, completed, total));
+                    await Task.Delay(delay, ct);
+                }
+            }
+        }
+
         foreach (var job in queued)
         {
             ct.ThrowIfCancellationRequested();
@@ -24,61 +96,66 @@ public sealed class SyncExecutor(SyncJournal journal)
             var op = job.Operation;
             try
             {
-                progress?.Report(new(SyncPhase.Scanning, "현재 상태 재확인 중", op.Path, op.Action, completed, total));
-                var left = await local.ScanAsync(ct); var right = await remote.ScanAsync(ct);
-                var plan = SyncPlanner.Compare(left, right, journal.ReadBaseline(pair));
-                if (!plan.CanExecute) throw new SyncPreconditionException(string.Join(" / ", plan.Errors));
-                var l = left.Entries.SingleOrDefault(x => x.Path == op.Path);
-                var r = right.Entries.SingleOrDefault(x => x.Path == op.Path);
-                if (op.Action != SyncAction.Conflict && OutcomeAlreadyPresent(op, l, r))
-                { journal.SetOutcome(job.Id, JobState.Applied); completed++; continue; }
-                // Replanning protects directory deletion when a descendant changed after enqueue.
-                if (!plan.Operations.Any(x => x.Path == op.Path && x.Action == op.Action) || l != op.ExpectedLocal || r != op.ExpectedRemote)
-                    throw new SyncPreconditionException("계획 이후 상태가 변경되었습니다. 새 계획이 필요합니다.");
-                var transferred = 0L;
-                void Sent(long count)
+                if (await Attempt(job))
                 {
-                    transferred += count;
-                    progress?.Report(new(SyncPhase.Transferring, Describe(op.Action), op.Path, op.Action, completed, total, transferred));
+                    journal.SetOutcome(job.Id, JobState.NeedsReconcile); completed++; permanent++;
+                    issues.Add(op.Path + ": 충돌 원본과 보존 사본을 확인해야 합니다.");
                 }
-                progress?.Report(new(SyncPhase.Transferring, Describe(op.Action), op.Path, op.Action, completed, total));
-                switch (op.Action)
-                {
-                    case SyncAction.Upload: await Copy(local, remote, op.ExpectedLocal!, op.Path, op.ExpectedRemote, ct, Sent); break;
-                    case SyncAction.Download: await Copy(remote, local, op.ExpectedRemote!, op.Path, op.ExpectedLocal, ct, Sent); break;
-                    case SyncAction.DeleteLocal: await local.DeleteAsync(op.ExpectedLocal!, ct); break;
-                    case SyncAction.DeleteRemote: await remote.DeleteAsync(op.ExpectedRemote!, ct); break;
-                    case SyncAction.Conflict:
-                        await PreserveConflict(job, local, remote, ct);
-                        journal.SetOutcome(job.Id, JobState.NeedsReconcile);
-                        completed++;
-                        issues.Add(op.Path + ": 충돌 원본과 보존 사본을 확인해야 합니다.");
-                        continue;
-                }
-                journal.SetOutcome(job.Id, JobState.Applied);
-                completed++;
+                else { journal.SetOutcome(job.Id, JobState.Applied); completed++; }
             }
-            catch (OperationCanceledException)
-            { journal.SetOutcome(job.Id, JobState.NeedsReconcile); progress?.Report(new(SyncPhase.Idle, "중단했습니다.", op.Path, op.Action, completed, total)); throw; }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException or HttpRequestException)
-            { journal.SetOutcome(job.Id, JobState.NeedsReconcile); completed++; issues.Add(op.Path + ": " + ex.Message); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                journal.SetOutcome(job.Id, JobState.NeedsReconcile);
+                progress?.Report(new(SyncPhase.Idle, "중단했습니다.", op.Path, op.Action, completed, total));
+                throw;
+            }
+            catch (Exception ex) when (Handled(ex))
+            {
+                var kind = Classify(ex);
+                journal.SetOutcome(job.Id, JobState.NeedsReconcile); completed++;
+                if (kind != SyncFailureKind.Transient) permanent++;
+                issues.Add($"{op.Path}: [{Label(kind)}] {ex.Message}");
+            }
         }
+        var transientOnly = issues.Count > 0 && permanent == 0;
         var jobs = journal.ReadJobs(pair);
         if (jobs.Any(x => x.State is JobState.Pending or JobState.Running or JobState.NeedsReconcile))
         {
             progress?.Report(new(SyncPhase.Attention, "완료되지 않은 항목이 있습니다.", Completed: completed, Total: total));
-            return new(false, issues);
+            return new(false, issues, transientOnly);
         }
         try
         {
             progress?.Report(new(SyncPhase.Verifying, "양쪽 폴더 상태 확인 중", Completed: completed, Total: total));
-            journal.CommitConverged(pair, await local.ScanAsync(ct), await remote.ScanAsync(ct));
-            progress?.Report(new(SyncPhase.Idle, "동기화 완료", Completed: completed, Total: total));
-            return new(true, issues);
+            var finalLocal = await local.ScanAsync(ct); var finalRemote = await remote.ScanAsync(ct);
+            journal.CommitConverged(pair, finalLocal, finalRemote);
+            var notices = SyncPlanner.Compare(finalLocal, finalRemote, []).Unsupported.Select(x => $"{x.Path}: {x.Reason}").ToArray();
+            progress?.Report(new(SyncPhase.Idle, notices.Length == 0 ? "동기화 완료" : $"동기화 완료 · 미지원 항목 {notices.Length}개", Completed: completed, Total: total));
+            return new(true, issues) { Notices = notices };
         }
         catch (InvalidOperationException ex)
         { issues.Add(ex.Message); progress?.Report(new(SyncPhase.Attention, ex.Message, Completed: completed, Total: total)); return new(false, issues); }
     }
+
+    private static bool Handled(Exception ex) => ex is IOException or UnauthorizedAccessException or InvalidOperationException or HttpRequestException or OperationCanceledException;
+    /// <summary>A cancellation reaching here is a timeout, not the caller stopping: user cancellation is filtered before this.</summary>
+    internal static SyncFailureKind Classify(Exception ex) => ex switch
+    {
+        SyncTransferException transfer => transfer.Kind,
+        FileNotFoundException or DirectoryNotFoundException => SyncFailureKind.Missing,
+        UnauthorizedAccessException => SyncFailureKind.Permission,
+        HttpRequestException or OperationCanceledException => SyncFailureKind.Transient,
+        _ => SyncFailureKind.Unknown
+    };
+    private static string Label(SyncFailureKind kind) => kind switch
+    {
+        SyncFailureKind.Transient => "일시 오류",
+        SyncFailureKind.Authentication => "인증",
+        SyncFailureKind.Permission => "권한",
+        SyncFailureKind.Missing => "항목 없음",
+        SyncFailureKind.Precondition => "상태 불일치",
+        _ => "오류"
+    };
     private static string Describe(SyncAction action) => action switch
     {
         SyncAction.Upload => "업로드 중",

@@ -39,4 +39,6 @@ await MonitorChecks.Run(scratch);
 PreferencesChecks.Run(scratch);
 await RecoveryChecks.Run(scratch);
 await ManagementChecks.Run(scratch);
+await ResilienceChecks.Run(scratch);
+await UnsupportedChecks.Run(scratch);
 Console.WriteLine("All checks passed.");

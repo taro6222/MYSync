@@ -4,12 +4,25 @@ using System.Text;
 using System.Xml;
 using System.Xml.Linq;
 using MYSync.Provider.Abstractions;
+using MYSync.Sync.Core;
 
 namespace MYSync.Provider.WebDav;
 
-public sealed class WebDavException(string message, HttpStatusCode? status = null) : IOException(message)
+public sealed class WebDavException : SyncTransferException
 {
-    public HttpStatusCode? Status { get; } = status;
+    public HttpStatusCode? Status { get; }
+    public WebDavException(string message, HttpStatusCode? status = null) : base(message, Classify(status)) => Status = status;
+    // Only genuinely temporary conditions are Transient. Storage exhaustion and unknown codes are not retried.
+    private static SyncFailureKind Classify(HttpStatusCode? status) => status switch
+    {
+        HttpStatusCode.Unauthorized => SyncFailureKind.Authentication,
+        HttpStatusCode.Forbidden => SyncFailureKind.Permission,
+        HttpStatusCode.NotFound or HttpStatusCode.Gone => SyncFailureKind.Missing,
+        HttpStatusCode.PreconditionFailed or HttpStatusCode.Conflict or HttpStatusCode.MethodNotAllowed => SyncFailureKind.Precondition,
+        HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests or HttpStatusCode.Locked or HttpStatusCode.ServiceUnavailable => SyncFailureKind.Transient,
+        not null when (int)status.Value is >= 500 and < 600 => SyncFailureKind.Transient,
+        _ => SyncFailureKind.Unknown
+    };
 }
 public sealed partial class WebDavProvider : IProvider, IConfigurableProvider, ITransferProvider
 {
@@ -62,12 +75,12 @@ public sealed partial class WebDavProvider : IProvider, IConfigurableProvider, I
         return items.Where(x => x.IsFolder).Select(x => new RemoteFolder(x.Uri.AbsoluteUri.TrimEnd('/') + "/", x.Name, x.IsSelf ? null : target.AbsoluteUri))
             .OrderBy(x => x.ParentId is null ? 0 : 1).ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToArray();
     }
-    private sealed record DavItem(Uri Uri, string Name, bool IsFolder, bool IsSelf);
+    private sealed record DavItem(Uri Uri, string Name, bool IsFolder, bool IsSelf, string? ETag = null, long? Length = null);
     private static async Task<IReadOnlyList<DavItem>> Query(HttpClient client, Uri scope, Uri target, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(new HttpMethod("PROPFIND"), target);
         request.Headers.Add("Depth", "1");
-        request.Content = new StringContent("<d:propfind xmlns:d=\"DAV:\"><d:prop><d:resourcetype/><d:displayname/></d:prop></d:propfind>", Encoding.UTF8, "application/xml");
+        request.Content = new StringContent("<d:propfind xmlns:d=\"DAV:\"><d:prop><d:resourcetype/><d:displayname/><d:getetag/><d:getcontentlength/></d:prop></d:propfind>", Encoding.UTF8, "application/xml");
         using var response = await client.SendAsync(request, HttpCompletionOption.ResponseContentRead, ct);
         if (response.StatusCode != HttpStatusCode.MultiStatus)
             throw new WebDavException(response.StatusCode switch
@@ -102,7 +115,9 @@ public sealed partial class WebDavProvider : IProvider, IConfigurableProvider, I
             if (self) { if (!isFolder) throw new WebDavException("선택한 주소는 폴더가 아닙니다."); foundSelf = true; }
             var name = props.Elements(dav + "displayname").FirstOrDefault()?.Value;
             if (string.IsNullOrWhiteSpace(name)) name = Uri.UnescapeDataString(resource.AbsolutePath.TrimEnd('/').Split('/').Last());
-            result.Add(new(resource, string.IsNullOrWhiteSpace(name) ? "/" : name, isFolder, self));
+            var etag = props.Elements(dav + "getetag").FirstOrDefault()?.Value?.Trim();
+            long? length = long.TryParse(props.Elements(dav + "getcontentlength").FirstOrDefault()?.Value, out var declared) && declared >= 0 ? declared : null;
+            result.Add(new(resource, string.IsNullOrWhiteSpace(name) ? "/" : name, isFolder, self, string.IsNullOrEmpty(etag) ? null : etag, length));
         }
         if (!foundSelf) throw new WebDavException("조회한 폴더 자체의 상태가 누락되었습니다.");
         return result;

@@ -73,7 +73,10 @@ public sealed class SyncRunWindow : Window
             var existing = journal.ReadJobs(pair.Id).Where(x => x.State != JobState.Completed).ToArray(); resume = existing.Length > 0;
             grid.ItemsSource = resume ? existing.Select(x => x.Operation).ToArray() : plan.Operations;
             execute.Content = resume ? "미완료 작업 재검사·재개" : "표시된 작업 실행";
-            status.Text = resume ? "미완료 작업을 표시합니다. 실행 시 현재 상태를 다시 확인합니다." : $"{plan.Operations.Count}개 작업. Upload=업로드, Download=다운로드, Delete=삭제, Conflict=충돌 보존.";
+            var skipped = plan.Unsupported.Count == 0 ? "" :
+                $"\n미지원 항목 {plan.Unsupported.Count}개(동기화하지 않고 양쪽 모두 그대로 둡니다): " +
+                string.Join(" / ", plan.Unsupported.Take(5).Select(x => x.Path + " — " + x.Reason)) + (plan.Unsupported.Count > 5 ? " …" : "");
+            status.Text = (resume ? "미완료 작업을 표시합니다. 실행 시 현재 상태를 다시 확인합니다." : $"{plan.Operations.Count}개 작업. Upload=업로드, Download=다운로드, Delete=삭제, Conflict=충돌 보존.") + skipped;
             execute.IsEnabled = true;
         }
         catch (OperationCanceledException) { status.Text = "검사를 중단했습니다."; }
@@ -89,7 +92,8 @@ public sealed class SyncRunWindow : Window
             status.Text = "동기화 중…";
             if (!resume) journal.Enqueue(pair.Id, plan);
             var report = await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, operation!.Token, progress);
-            status.Text = report.Converged ? "양쪽 폴더의 내용이 일치합니다. 동기화를 완료했습니다." : "완료되지 않은 항목이 있습니다. " + string.Join(" / ", report.Issues);
+            status.Text = (report.Converged ? "양쪽 폴더의 내용이 일치합니다. 동기화를 완료했습니다." : "완료되지 않은 항목이 있습니다. " + string.Join(" / ", report.Issues))
+                + (report.Notices.Count == 0 ? "" : "\n미지원 항목 " + report.Notices.Count + "개: " + string.Join(" / ", report.Notices.Take(5)));
         }
         catch (OperationCanceledException) { status.Text = "중단했습니다. 다시 검사해 미완료 작업을 재개할 수 있습니다."; }
         catch (Exception ex) { status.Text = "실행 실패: " + ex.Message; }
