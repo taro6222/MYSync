@@ -4,6 +4,7 @@
     <Project Path="src/MYSync.PluginHost/MYSync.PluginHost.csproj" />
     <Project Path="src/MYSync.Provider.Abstractions/MYSync.Provider.Abstractions.csproj" />
     <Project Path="src/MYSync.Provider.Sample/MYSync.Provider.Sample.csproj" />
+    <Project Path="src/MYSync.Provider.WebDav/MYSync.Provider.WebDav.csproj" />
     <Project Path="src/MYSync.Sync.Core/MYSync.Sync.Core.csproj" />
     <Project Path="src/MYSync.Sync.Infrastructure/MYSync.Sync.Infrastructure.csproj" />
   </Folder>

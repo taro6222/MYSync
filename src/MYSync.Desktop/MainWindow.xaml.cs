@@ -39,6 +39,7 @@ public partial class MainWindow : Window
     {
         RemoteBox.ItemsSource = null;
         if (ProvidersBox.SelectedItem is not IProvider p) return;
+        if (p is IConfigurableProvider configured && !configured.IsConnected) { StatusText.Text = "계정 연결 버튼으로 접속 정보를 입력하세요."; return; }
         try
         {
             var folders = await p.GetFoldersAsync(null, CancellationToken.None);
@@ -46,10 +47,41 @@ public partial class MainWindow : Window
         }
         catch (Exception ex) { StatusText.Text = ex.Message; }
     }
+    private async void ConnectProvider(object sender, RoutedEventArgs e)
+    {
+        if (ProvidersBox.SelectedItem is not IConfigurableProvider configurable) { StatusText.Text = "이 Provider는 별도 연결 설정이 없습니다."; return; }
+        var provider = (IProvider)configurable;
+        var dialog = new ProviderConnectionWindow(configurable.ConnectionFields) { Owner = this };
+        if (dialog.ShowDialog() != true) return;
+        ProvidersBox.IsEnabled = false;
+        try
+        {
+            StatusText.Text = "연결 확인 중…";
+            await configurable.ConnectAsync(dialog.Values, CancellationToken.None);
+            RemoteBox.ItemsSource = await provider.GetFoldersAsync(null, CancellationToken.None);
+            StatusText.Text = "연결했습니다. 폴더 탐색을 사용할 수 있습니다. 계정 저장·실제 전송은 아직 지원하지 않습니다.";
+        }
+        catch (Exception ex) { StatusText.Text = "연결 실패: " + ex.Message; }
+        finally { ProvidersBox.IsEnabled = true; }
+    }
+    private async Task Browse(string? folderId)
+    {
+        if (ProvidersBox.SelectedItem is not IProvider provider) return;
+        try
+        {
+            var folders = await provider.GetFoldersAsync(folderId, CancellationToken.None);
+            if (ReferenceEquals(ProvidersBox.SelectedItem, provider)) RemoteBox.ItemsSource = folders;
+        }
+        catch (Exception ex) { StatusText.Text = "폴더 조회 실패: " + ex.Message; }
+    }
+    private async void BrowseRemote(object sender, RoutedEventArgs e)
+    { if (RemoteBox.SelectedItem is RemoteFolder folder) await Browse(folder.Id); }
+    private async void BrowseRoot(object sender, RoutedEventArgs e) => await Browse(null);
     private void SavePair(object sender, RoutedEventArgs e)
     {
         if (ProvidersBox.SelectedItem is not IProvider p || RemoteBox.SelectedItem is not RemoteFolder folder || !Directory.Exists(LocalPathBox.Text))
         { StatusText.Text = "Provider와 로컬·원격 폴더를 선택하세요."; return; }
+        if (p is IConfigurableProvider) { StatusText.Text = "계정 영속 저장 구현 전에는 이 Provider의 동기화 쌍을 저장할 수 없습니다. 현재는 연결·탐색만 지원합니다."; return; }
         var path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(LocalPathBox.Text));
         if (model.Pairs.Any(x => Overlaps(x.LocalPath, path))) { StatusText.Text = "기존 동기화 폴더와 중복되거나 겹칩니다."; return; }
         try

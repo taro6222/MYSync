@@ -2,7 +2,7 @@ using Microsoft.Data.Sqlite;
 using System.Text.Json;
 using MYSync.Sync.Core;
 namespace MYSync.Sync.Infrastructure;
-public enum JobState { Pending, Running, NeedsReconcile, Completed }
+public enum JobState { Pending, Running, NeedsReconcile, Completed, Applied }
 public sealed record JournalJob(long Id, Guid PairId, PlannedOperation Operation, JobState State);
 public sealed class SyncJournal
 {
@@ -55,6 +55,22 @@ public sealed class SyncJournal
         cmd.CommandText = "UPDATE Jobs SET State=$running WHERE Id=$id AND State=$pending";
         cmd.Parameters.AddWithValue("$running", (int)JobState.Running); cmd.Parameters.AddWithValue("$pending", (int)JobState.Pending); cmd.Parameters.AddWithValue("$id", id);
         return cmd.ExecuteNonQuery() == 1;
+    }
+    public bool TryAcquire(long id)
+    {
+        using var c = Open(); using var cmd = c.CreateCommand();
+        cmd.CommandText = "UPDATE Jobs SET State=$running WHERE Id=$id AND State IN ($pending,$reconcile)";
+        cmd.Parameters.AddWithValue("$running", (int)JobState.Running); cmd.Parameters.AddWithValue("$pending", (int)JobState.Pending);
+        cmd.Parameters.AddWithValue("$reconcile", (int)JobState.NeedsReconcile); cmd.Parameters.AddWithValue("$id", id);
+        return cmd.ExecuteNonQuery() == 1;
+    }
+    public void SetOutcome(long id, JobState state)
+    {
+        if (state is not (JobState.Applied or JobState.NeedsReconcile)) throw new ArgumentOutOfRangeException(nameof(state));
+        using var c = Open(); using var cmd = c.CreateCommand();
+        cmd.CommandText = "UPDATE Jobs SET State=$state WHERE Id=$id AND State=$running";
+        cmd.Parameters.AddWithValue("$state", (int)state); cmd.Parameters.AddWithValue("$running", (int)JobState.Running); cmd.Parameters.AddWithValue("$id", id);
+        if (cmd.ExecuteNonQuery() != 1) throw new InvalidOperationException("실행 중인 작업만 결과를 기록할 수 있습니다.");
     }
     // Call only at startup, before any workers start. Never blindly replay an interrupted side effect.
     public void RecoverInterrupted()

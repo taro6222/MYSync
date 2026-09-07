@@ -30,4 +30,7 @@ var folders = await catalog.Providers.Single().GetFoldersAsync(null, Cancellatio
 if (folders.Single().Id != "sample-root") throw new Exception("Shared contract invocation failed");
 Console.WriteLine("PASS: DLL discovery, shared contract invocation, duplicate/incompatible/path escape/missing assembly rejection");
 await EngineChecks.Run(scratch);
+await ExecutionChecks.Run(scratch);
+await LocalEndpointChecks.Run(scratch);
+await WebDavChecks.Run(root);
 Console.WriteLine("All checks passed.");

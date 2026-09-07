@@ -8,5 +8,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Build failed' }
 $destination = 'src/MYSync.Desktop/bin/Debug/net10.0-windows/plugins/Sample'
 New-Item -ItemType Directory -Path $destination -Force | Out-Null
 Get-ChildItem 'src/MYSync.Provider.Sample/bin/Debug/net10.0' -File | Copy-Item -Destination $destination -Force
+$webDavDestination = 'src/MYSync.Desktop/bin/Debug/net10.0-windows/plugins/WebDAV'
+New-Item -ItemType Directory -Path $webDavDestination -Force | Out-Null
+Get-ChildItem 'src/MYSync.Provider.WebDav/bin/Debug/net10.0' -File | Copy-Item -Destination $webDavDestination -Force
 if ($Check) { & $dotnet run --project tests/MYSync.Checks --no-build -- $PSScriptRoot; if ($LASTEXITCODE -ne 0) { throw 'Checks failed' } }
 if ($Run) { & $dotnet 'src/MYSync.Desktop/bin/Debug/net10.0-windows/MYSync.Desktop.dll' }
