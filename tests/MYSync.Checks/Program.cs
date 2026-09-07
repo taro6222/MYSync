@@ -38,4 +38,5 @@ await WebDavTransferChecks.Run(scratch);
 await MonitorChecks.Run(scratch);
 PreferencesChecks.Run(scratch);
 await RecoveryChecks.Run(scratch);
+await ManagementChecks.Run(scratch);
 Console.WriteLine("All checks passed.");

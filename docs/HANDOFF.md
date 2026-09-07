@@ -29,6 +29,8 @@ Windows에서 로컬·원격 폴더를 선택해 전체 내용을 양방향으�
 | `src/MYSync.Desktop/MainWindow.xaml(.cs)` | 계정 연결, 폴더·동기화 쌍 관리, 자동 실행·트레이 제어 |
 | `src/MYSync.Desktop/SyncRunWindow.cs` | 수동 검사, 계획 미리보기, 실행·취소, 미완료 작업 재검사 |
 | `src/MYSync.Desktop/ResolveWindow.cs` | 미해결 작업·충돌 결정, 복구 기록 조회·복원·확인 처리 |
+| `src/MYSync.Desktop/TransferRow.cs` | 전송 탭 한 줄의 표시 상태 |
+| `src/MYSync.Desktop/TextPromptWindow.cs` | 한 줄 입력 대화상자 |
 | `src/MYSync.Desktop/App.xaml.cs` | 단일 인스턴스 mutex와 기존 창 표시 이벤트 |
 | `src/MYSync.Desktop/StartupRegistration.cs` | HKCU Run 등록·조회, `--background` 실행 |
 | `src/MYSync.Provider.Abstractions/Contracts.cs` | 탐색·연결·전송 Provider 계약 |
@@ -75,7 +77,7 @@ DPAPI 계정은 같은 Windows 사용자 환경에 종속됩니다. DB를 복사
 - 원격 폴더 삭제는 하위 항목의 동시 변경을 원자적으로 보호할 수 없어 거부합니다. 원격 파일 삭제의 휴지통·버전 보존은 보장하지 않습니다.
 - 확인되지 않은 원격 임시 파일은 임의 삭제하지 않습니다. 예약된 `.mysync-upload-` 항목 발견 시 검사를 차단합니다.
 
-로컬 보존 처리가 전원 장애의 모든 경우나 악의적인 외부 프로세스의 경로 경쟁까지 보장하지는 않습니다. 세부 정책은 [로컬 복구](local-recovery.md), [WebDAV 전송](webdav-transfer.md), [충돌·복구 확인](conflict-recovery.md)을 확인하세요.
+로컬 보존 처리가 전원 장애의 모든 경우나 악의적인 외부 프로세스의 경로 경쟁까지 보장하지는 않습니다. 세부 정책은 [로컬 복구](local-recovery.md), [WebDAV 전송](webdav-transfer.md), [충돌·복구 확인](conflict-recovery.md), [전송 상태와 계정 관리](transfers-and-accounts.md)를 확인하세요.
 
 ## Provider 확장 시 주의점
 
@@ -87,15 +89,14 @@ DPAPI 계정은 같은 Windows 사용자 환경에 종속됩니다. DB를 복사
 
 문서 작성 전 최신 코드에서 Debug 빌드와 전체 통합 검증, Release 단일 EXE 게시가 성공했습니다. 빌드는 경고·오류 0개였습니다.
 
-자동 검증은 플러그인 로드/계약, 3자 비교·삭제 순서, SQLite 작업 복구, 실제 로컬 파일 왕복·원본 보존, DPAPI 암호화·구형 스키마 마이그레이션, WebDAV 조건부 전송·응답 유실·동시 변경, 이벤트 병합·주기 검사·취소, 설정 저장, 복구 기록 판정·복원·확인 처리와 충돌 결정 재계획을 포함합니다. WebDAV는 모의 HttpMessageHandler를 사용합니다.
+자동 검증은 플러그인 로드/계약, 3자 비교·삭제 순서, SQLite 작업 복구, 실제 로컬 파일 왕복·원본 보존, DPAPI 암호화·구형 스키마 마이그레이션, WebDAV 조건부 전송·응답 유실·동시 변경, 이벤트 병합·주기 검사·취소, 설정 저장, 복구 기록 판정·복원·확인 처리와 충돌 결정 재계획, 계정 이름 변경·인증 정보 갱신·삭제, 실행기 진행률 보고를 포함합니다. WebDAV는 모의 HttpMessageHandler를 사용합니다.
 
 **실제 WebDAV 서버, WPF 화면 상호작용, 트레이 메뉴, Windows 로그인 자동 실행, 장시간 운용은 아직 검증하지 않았습니다.** 자동 검사 통과를 실서비스 호환성 확인으로 해석하지 마세요. 실제 테스트 절차는 [manual-test.md](manual-test.md)를 사용하세요. 개발 과정에서 사용자 로그인 시작 등록을 직접 변경하지 않았습니다.
 
 ## 권장 다음 작업
 
 1. 테스트 전용 WebDAV 폴더로 수동 가이드 수행: 최초 업·다운로드, 동시 수정, 파일 삭제, 네트워크 중단 후 재개, 서버별 ETag/MOVE 조건 준수 확인. 창 닫기·트레이 종료·두 번째 실행·로그인 시작도 확인합니다.
-2. 전송 탭의 실제 작업·진행률 연결, 계정 이름 변경·수정·삭제와 참조 중인 계정 처리, 오류 안내를 보완합니다. 현재 상세 전송률은 없습니다.
-3. 안전한 오류 분류·재시도 정책과 대규모 폴더 성능을 개선합니다. 현재는 원격 파일 전체 다운로드 해시와 작업마다 재검사하므로 비용이 큽니다.
-4. Google Drive OAuth와 안정적인 파일 ID 기반 탐색·전송 Provider를 추가합니다. 인증과 페이지 처리·중복 이름·변경 추적·휴지통 정책을 별도로 설계하고 공통 계약 검증을 재사용합니다.
+2. 안전한 오류 분류·재시도 정책과 대규모 폴더 성능을 개선합니다. 현재는 원격 파일 전체 다운로드 해시와 작업마다 재검사하므로 비용이 큽니다.
+3. Google Drive OAuth와 안정적인 파일 ID 기반 탐색·전송 Provider를 추가합니다. 인증과 페이지 처리·중복 이름·변경 추적·휴지통 정책을 별도로 설계하고 공통 계약 검증을 재사용합니다.
 
 다음 기능 변경 전에는 이 문서와 관련 설계 문서를 읽고, 변경 후 `build.ps1 -Check`를 실행하세요. 실제 배포 테스트를 요청할 때는 `publish.ps1`로 EXE를 갱신하고 자동 검증과 수동 검증 결과를 구분해 기록하세요.

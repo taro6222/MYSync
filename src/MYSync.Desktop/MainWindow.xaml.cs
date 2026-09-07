@@ -12,6 +12,7 @@ public sealed class MainViewModel
 {
     public ObservableCollection<IProvider> Providers { get; } = [];
     public ObservableCollection<SyncPair> Pairs { get; } = [];
+    public ObservableCollection<TransferRow> Transfers { get; } = [];
 }
 public partial class MainWindow : Window
 {
@@ -117,7 +118,7 @@ public partial class MainWindow : Window
         }
     }
     private void ShowAdd(object sender, RoutedEventArgs e) => MainTabs.SelectedIndex = 1;
-    private void OpenSync(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new SyncRunWindow(pair, provider, accountStore, recovery, journalPath));
+    private void OpenSync(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new SyncRunWindow(pair, provider, accountStore, recovery, journalPath, ProgressFor(pair)));
     private void OpenResolve(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new ResolveWindow(pair, provider, accountStore, recovery, journalPath));
     private void OpenPairWindow(object sender, Func<SyncPair, IProvider, string, string, Window> create)
     {
@@ -133,6 +134,80 @@ public partial class MainWindow : Window
         }
         catch (Exception ex) { StatusText.Text = ex.Message; }
         finally { activeAccountId = null; RemoteBox.ItemsSource = null; }
+    }
+    private TransferRow RowFor(SyncPair pair)
+    {
+        var existing = model.Transfers.FirstOrDefault(x => x.PairId == pair.Id);
+        if (existing is not null) return existing;
+        var created = new TransferRow(pair.Id, pair.RemoteFolderName + "  ⇄  " + pair.LocalPath);
+        model.Transfers.Add(created);
+        return created;
+    }
+    // Created on the UI thread so reports from background workers are marshalled back.
+    private IProgress<SyncProgress> ProgressFor(SyncPair pair)
+    {
+        var row = RowFor(pair);
+        return new Progress<SyncProgress>(row.Apply);
+    }
+    private SavedAccount? SelectedAccount(out IConfigurableProvider? configurable)
+    {
+        configurable = ProvidersBox.SelectedItem as IConfigurableProvider;
+        if (AccountsBox.SelectedItem is not SavedAccount account) { StatusText.Text = "저장된 계정을 선택하세요."; return null; }
+        if (ProvidersBox.SelectedItem is IProvider provider && account.ProviderId != provider.Id) { StatusText.Text = "선택한 Provider의 계정이 아닙니다."; return null; }
+        return account;
+    }
+    private void RenameAccount(object sender, RoutedEventArgs e)
+    {
+        if (SelectedAccount(out _) is not { } account) return;
+        var dialog = new TextPromptWindow("계정 이름 변경", "표시할 이름", account.DisplayName) { Owner = this };
+        if (dialog.ShowDialog() != true) return;
+        try
+        {
+            accountStore.Rename(account.Id, dialog.Value);
+            RefreshAccounts(account.ProviderId);
+            AccountsBox.SelectedItem = AccountsBox.Items.Cast<SavedAccount>().FirstOrDefault(x => x.Id == account.Id);
+            StatusText.Text = "계정 이름을 변경했습니다.";
+        }
+        catch (Exception ex) { StatusText.Text = "이름 변경 실패: " + ex.Message; }
+    }
+    private async void UpdateAccount(object sender, RoutedEventArgs e)
+    {
+        if (SelectedAccount(out var configurable) is not { } account) return;
+        if (configurable is null || ProvidersBox.SelectedItem is not IProvider provider) { StatusText.Text = "이 Provider는 인증 정보 수정이 없습니다."; return; }
+        var dialog = new ProviderConnectionWindow(configurable.ConnectionFields) { Owner = this };
+        if (dialog.ShowDialog() != true) return;
+        MainTabs.IsEnabled = false;
+        activeAccountId = null;
+        RemoteBox.ItemsSource = null;
+        try
+        {
+            StatusText.Text = "새 인증 정보로 연결 확인 중…";
+            await configurable.ConnectAsync(dialog.Values, CancellationToken.None);
+            var folders = await provider.GetFoldersAsync(null, CancellationToken.None);
+            accountStore.Save(account, dialog.Values);
+            activeAccountId = account.Id;
+            RemoteBox.ItemsSource = folders;
+            StatusText.Text = "인증 정보를 갱신했습니다. 기존 동기화 항목은 그대로 이 계정을 사용합니다.";
+        }
+        catch (Exception ex) { StatusText.Text = "인증 정보 수정 실패: " + ex.Message; }
+        finally { MainTabs.IsEnabled = true; }
+    }
+    private void DeleteAccount(object sender, RoutedEventArgs e)
+    {
+        if (SelectedAccount(out _) is not { } account) return;
+        var referencing = model.Pairs.Where(x => x.AccountId == account.Id).Select(x => x.RemoteFolderName).ToArray();
+        if (referencing.Length > 0)
+        { StatusText.Text = "이 계정을 사용하는 동기화 항목이 있어 삭제할 수 없습니다: " + string.Join(", ", referencing); return; }
+        if (MessageBox.Show(this, account.DisplayName + "\n\n저장된 인증 정보를 삭제합니다. 되돌릴 수 없습니다. 계속할까요?",
+            "계정 삭제", MessageBoxButton.OKCancel, MessageBoxImage.Warning) != MessageBoxResult.OK) return;
+        try
+        {
+            accountStore.Delete(account.Id);
+            if (activeAccountId == account.Id) { activeAccountId = null; RemoteBox.ItemsSource = null; }
+            RefreshAccounts(account.ProviderId);
+            StatusText.Text = "계정을 삭제했습니다.";
+        }
+        catch (Exception ex) { StatusText.Text = "계정 삭제 실패: " + ex.Message; }
     }
     private string RecoveryPathFor(SyncPair pair)
     {
@@ -183,6 +258,7 @@ public partial class MainWindow : Window
             var journalPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MYSync", "journals", pair.Id.ToString("N") + ".db");
             var journal = new SyncJournal(journalPath); journal.RecoverInterrupted();
             var local = new LocalEndpoint(pair.LocalPath, recovery);
+            var progress = ProgressFor(pair);
             ISyncEndpoint? remote = null;
             monitor = new SyncMonitor(pair.LocalPath, async ct =>
             {
@@ -195,9 +271,10 @@ public partial class MainWindow : Window
                 }
                 var left = await local.ScanAsync(ct); var right = await remote.ScanAsync(ct);
                 var plan = SyncPlanner.Compare(left, right, journal.ReadBaseline(pair.Id));
-                if (!plan.CanExecute) return new ExecutionReport(false, plan.Errors);
+                if (!plan.CanExecute)
+                { progress.Report(new SyncProgress(SyncPhase.Attention, string.Join(" / ", plan.Errors))); return new ExecutionReport(false, plan.Errors); }
                 if (journal.ReadJobs(pair.Id).All(x => x.State == JobState.Completed)) journal.Enqueue(pair.Id, plan);
-                return await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, ct);
+                return await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, ct, progress);
             });
             var run = new AutoRun(monitor, session, runLock);
             monitor.StatusChanged += status => Dispatcher.BeginInvoke(new Action(async () =>
@@ -233,6 +310,7 @@ public partial class MainWindow : Window
         {
             run.Provider.Dispose(); run.RunLock.ReleaseMutex(); run.RunLock.Dispose();
             autoRuns.Remove(id);
+            model.Transfers.FirstOrDefault(x => x.PairId == id)?.Reset("자동 동기화를 중지했습니다.");
             UpdateTray();
             if (persistPause) SetPaused(id, true);
         }

@@ -45,6 +45,24 @@ public sealed class AccountStore
         while (r.Read()) accounts.Add(new(Guid.Parse(r.GetString(0)), r.GetString(1), r.GetString(2)));
         return accounts;
     }
+    /// <summary>Changes only the display name. Credentials and the account identity are untouched.</summary>
+    public void Rename(Guid id, string displayName)
+    {
+        if (string.IsNullOrWhiteSpace(displayName)) throw new ArgumentException("계정 이름을 입력하세요.");
+        if (displayName.Length > 120 || displayName.Any(char.IsControl)) throw new ArgumentException("계정 이름을 사용할 수 없습니다.");
+        using var c = Open(); using var cmd = c.CreateCommand();
+        cmd.CommandText = "UPDATE Accounts SET DisplayName=$name WHERE Id=$id";
+        cmd.Parameters.AddWithValue("$name", displayName.Trim()); cmd.Parameters.AddWithValue("$id", id.ToString());
+        if (cmd.ExecuteNonQuery() != 1) throw new InvalidOperationException("저장된 계정을 찾을 수 없습니다.");
+    }
+    /// <summary>Removes the account and its encrypted values. The caller must first ensure no sync pair references it.</summary>
+    public void Delete(Guid id)
+    {
+        using var c = Open(); using var cmd = c.CreateCommand();
+        cmd.CommandText = "DELETE FROM Accounts WHERE Id=$id";
+        cmd.Parameters.AddWithValue("$id", id.ToString());
+        if (cmd.ExecuteNonQuery() != 1) throw new InvalidOperationException("저장된 계정을 찾을 수 없습니다.");
+    }
     public Dictionary<string, string> ReadValues(SavedAccount account)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException();

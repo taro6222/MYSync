@@ -14,6 +14,7 @@ public sealed class SyncRunWindow : Window
     private readonly AccountStore accounts;
     private readonly SyncJournal journal;
     private readonly string recovery;
+    private readonly IProgress<SyncProgress>? progress;
     private readonly DataGrid grid = new() { IsReadOnly = true, AutoGenerateColumns = false, CanUserAddRows = false, Margin = new Thickness(0, 14, 0, 14) };
     private readonly TextBlock status = new() { TextWrapping = TextWrapping.Wrap };
     private readonly Button inspect = new() { Content = "변경 검사", Padding = new Thickness(16, 8, 16, 8) };
@@ -25,9 +26,9 @@ public sealed class SyncRunWindow : Window
     private ISyncEndpoint? remote;
     private SyncPlan? plan;
     private bool resume;
-    public SyncRunWindow(SyncPair pair, IProvider provider, AccountStore accounts, string recovery, string journalPath)
+    public SyncRunWindow(SyncPair pair, IProvider provider, AccountStore accounts, string recovery, string journalPath, IProgress<SyncProgress>? progress = null)
     {
-        this.pair = pair; this.provider = provider; this.accounts = accounts; this.recovery = recovery;
+        this.pair = pair; this.provider = provider; this.accounts = accounts; this.recovery = recovery; this.progress = progress;
         runLock = new Mutex(false, "Local\\MYSync-pair-" + pair.Id.ToString("N"));
         bool acquired;
         try { acquired = runLock.WaitOne(0); } catch (AbandonedMutexException) { acquired = true; }
@@ -87,7 +88,7 @@ public sealed class SyncRunWindow : Window
         {
             status.Text = "동기화 중…";
             if (!resume) journal.Enqueue(pair.Id, plan);
-            var report = await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, operation!.Token);
+            var report = await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, operation!.Token, progress);
             status.Text = report.Converged ? "양쪽 폴더의 내용이 일치합니다. 동기화를 완료했습니다." : "완료되지 않은 항목이 있습니다. " + string.Join(" / ", report.Issues);
         }
         catch (OperationCanceledException) { status.Text = "중단했습니다. 다시 검사해 미완료 작업을 재개할 수 있습니다."; }

@@ -65,7 +65,22 @@ public sealed partial class WebDavProvider
             }
             catch { await stream.DisposeAsync(); throw; }
         }
-        private static WebDavException Failure(string action, HttpStatusCode status) => new($"{action} 실패 (HTTP {(int)status}). 조건 불일치·권한·연결 상태를 확인하세요.", status);
+        private static WebDavException Failure(string action, HttpStatusCode status) => new(status switch
+        {
+            HttpStatusCode.Unauthorized => $"{action} 실패: 인증이 거부되었습니다. 저장된 계정의 사용자 이름과 비밀번호를 다시 확인하세요.",
+            HttpStatusCode.Forbidden => $"{action} 실패: 서버가 접근을 거부했습니다. 원격 폴더의 쓰기 권한을 확인하세요.",
+            HttpStatusCode.NotFound => $"{action} 실패: 원격 항목이 없습니다. 다시 검사하세요.",
+            HttpStatusCode.MethodNotAllowed => $"{action} 실패: 서버가 이 동작을 지원하지 않거나 같은 이름의 항목이 이미 있습니다.",
+            HttpStatusCode.Conflict => $"{action} 실패: 상위 폴더가 없습니다. 먼저 폴더를 만들어야 합니다.",
+            HttpStatusCode.PreconditionFailed => $"{action} 실패: 서버의 항목이 예상과 달라 조건부 요청이 거부되었습니다. 다시 검사한 뒤 실행하세요.",
+            HttpStatusCode.RequestEntityTooLarge => $"{action} 실패: 서버가 허용하는 크기를 초과했습니다.",
+            HttpStatusCode.Locked => $"{action} 실패: 서버에서 항목이 잠겨 있습니다.",
+            HttpStatusCode.InsufficientStorage => $"{action} 실패: 서버 저장 공간이 부족합니다.",
+            HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests => $"{action} 실패: 서버가 일시적으로 처리하지 못했습니다. 잠시 후 다시 시도하세요.",
+            _ when (int)status >= 500 => $"{action} 실패: 서버 오류 (HTTP {(int)status}). 잠시 후 다시 시도하세요.",
+            _ when (int)status is >= 300 and < 400 => $"{action} 실패: 서버가 다른 주소로 이동을 요구했습니다 (HTTP {(int)status}). 최종 WebDAV 폴더 주소를 입력하세요.",
+            _ => $"{action} 실패 (HTTP {(int)status}). 조건 불일치·권한·연결 상태를 확인하세요."
+        }, status);
         private static string StrongTag(string? tag)
         {
             if (tag is null || tag.Contains(']') || tag.Contains('[')) throw new SyncPreconditionException("서버의 강한 ETag가 없어 조건부 변경을 수행할 수 없습니다.");
