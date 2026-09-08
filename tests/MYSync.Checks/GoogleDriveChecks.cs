@@ -55,10 +55,19 @@ internal static class GoogleDriveChecks
             throw new Exception("invalid Google response accepted");
         }
         var server = new Server(); var sessions = new List<Session>();
+        var configPath = Path.Combine(scratch, "oauth-config.json");
+        try { OAuthClientConfiguration.Load(configPath); throw new Exception("missing app config accepted"); }
+        catch (InvalidOperationException) { }
+        await File.WriteAllTextAsync(configPath, JsonSerializer.Serialize(new { installed = new { client_id = "app.apps.googleusercontent.com", client_secret = "test-client" } }));
+        Check(OAuthClientConfiguration.Load(configPath)["client_id"] == "app.apps.googleusercontent.com", "desktop client config not loaded");
+        await File.WriteAllTextAsync(configPath, "{\"web\":{}}");
+        try { OAuthClientConfiguration.Load(configPath); throw new Exception("web client accepted as desktop"); }
+        catch (InvalidOperationException) { }
         using var provider = new GoogleDriveProvider((values, ct) =>
         { ct.ThrowIfCancellationRequested(); var session = new Session(); sessions.Add(session); return Task.FromResult<IGoogleSession>(session); }, () => server);
         var values = new Dictionary<string, string> { ["client_id"] = "test.apps.googleusercontent.com", ["client_secret"] = "client-secret-test-only" };
         await provider.ConnectAsync(values, default);
+        Check(provider is IBrowserLoginProvider && provider.ConnectionFields.Count == 0 && provider.LoginButtonText == "Google로 로그인", "Google still exposes credential entry fields");
         var folders = await provider.GetFoldersAsync(null, default);
         Check(folders.Count == 3 && folders[0].Id == "myroot" && folders.Skip(1).Select(x => x.Id).SequenceEqual(["a", "b"]), "pagination/root order/stable duplicate IDs");
         Check(sessions[0].Requests == server.Requests, "token not obtained for each API request");

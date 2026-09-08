@@ -1,41 +1,37 @@
-# Google Drive 연결 설정
+# Google Drive 로그인 설정
 
-2026-09-08: OAuth 로그인·암호화 계정 저장·내 드라이브 폴더 탐색을 구현했다. Google Drive 파일 전송과 동기화 쌍 저장은 아직 지원하지 않는다. NAS 연결 없이 설정할 수 있다.
+일반 사용자는 Google Cloud 설정 없이 **Google로 로그인** 버튼으로 연결한다. 공통 OAuth 설정은 앱 배포자가 한 번 준비한다. 현재 Google Drive는 로그인·폴더 탐색만 지원하며 파일 전송은 후속 단계다.
 
-## Google Cloud 준비
+## 사용자의 연결 순서
 
-1. [Google Cloud Console](https://console.cloud.google.com/)에서 개발용 프로젝트를 만들거나 선택한다.
-2. API 라이브러리에서 **Google Drive API**를 활성화한다.
-3. **Google Auth Platform**에서 앱 이름·사용자 지원 이메일 등 동의 화면 정보를 입력한다. 개인 Google 계정 테스트라면 외부 사용자 유형을 선택하고 테스트 상태에서 본인 Google 이메일을 테스트 사용자에 추가한다.
-4. 데이터 액세스에 `https://www.googleapis.com/auth/drive.readonly` 범위를 추가한다. 현재 코드는 이 읽기 전용 범위만 요청한다. 선택 폴더 하나로 제한되는 권한은 아니며 Drive 파일 읽기 권한이다.
-5. 클라이언트에서 OAuth 클라이언트를 만들고 애플리케이션 유형을 **데스크톱 앱**으로 선택한다. 웹 애플리케이션이나 서비스 계정이 아니다.
-6. 생성된 클라이언트 ID와 클라이언트 보안 비밀번호를 MYSync에 직접 입력한다. 채팅·스크린샷·Git에 붙여 넣지 않는다.
+1. 동기화 추가에서 Google Drive를 선택하고 **Google로 로그인**을 누른다.
+2. 기본 브라우저에서 계정을 선택하고 Drive 읽기 권한을 승인한다.
+3. MYSync로 돌아와 내 드라이브 폴더를 탐색한다.
+4. 다음 실행에서는 저장 계정 연결을 사용한다. 인증을 다시 받아야 하면 **Google 다시 로그인**을 누른다.
 
-메뉴 위치는 계정과 Console 버전에 따라 다를 수 있다. 공식 [OAuth 클라이언트 생성 안내](https://developers.google.com/workspace/guides/create-credentials#desktop-app)를 참고한다.
+클라이언트 ID·보안 비밀번호 입력창은 표시하지 않는다. 로그인 대기는 최대 3분이다. 공통 설정이 없는 개발 빌드는 “Google 로그인이 아직 준비되지 않았습니다”라고 안내한다.
 
-## MYSync에서 연결
+## 배포자가 한 번 준비할 설정
 
-1. 최신 배포 폴더 전체를 사용한다. EXE 옆 `plugins/GoogleDrive`에 SDK DLL과 deps.json도 있어야 한다.
-2. 동기화 추가 → **Google Drive (연결·탐색)** → 새 계정 연결.
-3. 위 클라이언트 ID와 보안 비밀번호를 입력한다. 기본 브라우저에서 본인 Google 계정에 로그인하고 요청 범위를 확인해 승인한다.
-4. 로그인 응답을 받으면 MYSync로 돌아간다. 대기 제한은 3분이다. 브라우저를 닫는 것만으로 즉시 취소되지는 않는다.
-5. 현재 폴더가 목록 첫 번째에 표시된다. 하위 폴더를 선택해 열거나 루트로 돌아갈 수 있다. 이름이 같아도 별도 ID의 폴더로 유지한다.
-6. 앱 재시작 후 저장 계정 연결로 재연결한다. 유효한 갱신 토큰이 있으면 브라우저를 열지 않는다. 권한 만료·철회 시 인증 정보 수정으로 다시 로그인한다.
+1. [Google Cloud Console](https://console.cloud.google.com/)에서 MYSync에 사용할 프로젝트를 선택하고 Google Drive API를 활성화한다.
+2. Google Auth Platform에서 동의 화면을 구성하고, 개발 중에는 본인 계정을 테스트 사용자로 추가한다.
+3. 현재 단계의 범위는 `https://www.googleapis.com/auth/drive.readonly`다. 선택 폴더 하나로 한정된 권한이 아니라 Drive 읽기 권한이며, 전송 구현 시 필요한 쓰기 권한과 재동의를 추가한다.
+4. OAuth 클라이언트 유형을 **데스크톱 앱**으로 만들고 Google에서 JSON 설정을 다운로드한다.
+5. 다운로드한 JSON을 저장소의 `.tools/google/oauth-client.json`에 둔다. 최상위 `installed` 아래에 `client_id`, `client_secret`이 있어야 한다. 웹 앱 또는 서비스 계정 JSON은 지원하지 않는다.
+6. `build.ps1` 또는 `publish.ps1`을 실행한다. 설정은 출력의 `plugins/GoogleDrive/oauth-client.json`에 복사된다.
 
-테스트 상태에서는 Google 정책에 따라 갱신 토큰이 만료될 수 있다. `drive.readonly`는 제한된 범위이며 공개 배포 전 검증 요건을 별도로 검토해야 한다. 자세한 내용은 [Drive 권한 범위](https://developers.google.com/workspace/drive/api/guides/api-specific-auth)와 [데스크톱 OAuth](https://developers.google.com/identity/protocols/oauth2/native-app)를 참고한다.
+`.tools`와 `build`는 Git에서 제외되어 있다. 실제 설정 파일을 소스에 커밋하거나 채팅에 붙여 넣지 않는다. 네이티브 앱에 배포되는 OAuth 클라이언트 정보는 추출 가능한 앱 식별 정보이며 서버의 비밀키처럼 숨길 수 있는 값은 아니다. 사용자의 갱신 토큰과는 구분한다.
 
-## 구현과 저장
+저장 계정은 원래 OAuth 클라이언트와 토큰을 함께 암호화해 유지한다. 공통 설정을 바꿔도 기존 토큰에 새 클라이언트를 억지로 연결하지 않는다. 새 공통 클라이언트로 전환하려면 다시 로그인한다. 디버그 출력의 기존 설정은 원본 파일을 제거해도 자동 제거하지 않으므로 설정 제거 테스트에는 새 출력 폴더를 사용한다.
 
-- Google.Apis.Auth 1.76.0의 PKCE 설치 앱 흐름, 기본 브라우저, 127.0.0.1 루프백 수신기를 사용한다. Google 비밀번호는 MYSync에 입력하지 않는다.
-- SDK 기본 FileDataStore를 사용하지 않는다. 로그인 중 토큰은 메모리에만 보관하고, 성공 후 선택적 공통 계약 IPersistableConnectionProvider로 호스트에 전달한다.
-- 클라이언트 정보와 토큰 응답은 기존 `%LOCALAPPDATA%/MYSync/settings.db`에 DPAPI CurrentUser로 암호화한다. 로그에 토큰·요청 헤더·응답 본문을 기록하지 않는다.
-- 액세스 토큰 갱신은 SDK가 담당한다. 초기 로그인·인증 정보 수정·저장 계정 재연결 성공 때 갱신된 토큰을 다시 암호화 저장한다. 장기 세션 중 변경된 토큰을 즉시 영속화하는 이벤트는 후속 범위다.
-- Drive REST v3로 현재 폴더 확인·하위 폴더 페이지 조회를 수행한다. 불완전 검색, 반복 페이지, 중복 ID, 잘못된 부모, 공유 드라이브, 휴지통 항목은 거부한다.
-- 이 단계는 ITransferProvider를 구현하지 않는다. Google 동기화 쌍 저장을 UI에서 막고 연결·탐색 단계임을 표시한다.
-- 플러그인 의존성을 해석할 수 있도록 publish.ps1에서 deps.json을 보존한다. EXE의 단일 파일 구조는 유지하며 외부 플러그인 의존성은 폴더에 둔다.
+현재 배포용 OAuth 클라이언트는 아직 준비되지 않았다. 일반 사용자의 절차와 달리, 이 프로젝트의 배포자는 위 준비를 먼저 해야 실제 로그인이 가능하다.
 
-## 검증과 다음 단계
+## 구현·검증
 
-모의 인증 세션·HTTP 응답으로 페이지 조회, 같은 이름의 서로 다른 ID, 범위 오류·불완전 결과·취소 거부, 연결 실패 시 기존 세션 유지, OAuth 결과 DPAPI 저장, 플러그인 SDK 로드를 검증한다. 실제 Google 로그인, 브라우저 루프백 응답, 토큰 갱신 서버 동작과 화면 조작은 별도로 확인해야 한다. 자동 검증은 Google에 연결하거나 브라우저를 열지 않는다.
+Google.Apis.Auth 1.76.0의 PKCE 설치 앱 인증과 127.0.0.1 루프백 수신기를 사용한다. SDK의 평문 FileDataStore는 사용하지 않는다. 생성된 토큰은 호스트의 DPAPI CurrentUser 계정 저장소에 보관한다. 로그인·수정·재연결 성공 시 저장하고, 토큰·헤더·본문은 로그에 남기지 않는다.
 
-다음은 재귀 파일 검사·미지원 항목 보고, 안전한 파일 ID 기반 전송 설계다. 전송 도입 시 쓰기 권한 재동의가 필요하다. Google 문서·바로가기·공유 드라이브·중복 이름의 동기화 정책과 응답 유실·동시 변경 보호를 먼저 검증한다.
+공통 선택 계약 `IBrowserLoginProvider`로 버튼 문구와 입력창 생략 여부를 결정한다. WebDAV는 기존 설정 입력을 유지한다. `IPersistableConnectionProvider`로 OAuth 결과를 암호화 저장소에 전달한다.
+
+모의 인증·HTTP로 폴더 페이지, 중복 이름의 별도 ID, 불완전 검색·잘못된 부모·공유 드라이브 거부, 암호화 저장, SDK 로드 및 공통 설정 누락·형식 검증을 수행한다. 실제 Google 로그인·갱신·화면 조작은 미검증이다. Google 동기화 쌍 저장은 전송 구현 전까지 차단한다.
+
+공개 배포와 테스트 사용자·제한 범위 검증은 [Google OAuth 자격 증명 안내](https://developers.google.com/workspace/guides/create-credentials#desktop-app), [Drive 범위 안내](https://developers.google.com/workspace/drive/api/guides/api-specific-auth), [데스크톱 OAuth 안내](https://developers.google.com/identity/protocols/oauth2/native-app)를 따른다.

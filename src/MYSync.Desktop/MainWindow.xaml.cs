@@ -174,17 +174,17 @@ public partial class MainWindow : Window
     {
         if (SelectedAccount(out var configurable) is not { } account) return;
         if (configurable is null || ProvidersBox.SelectedItem is not IProvider provider) { StatusText.Text = "이 Provider는 인증 정보 수정이 없습니다."; return; }
-        var dialog = new ProviderConnectionWindow(configurable.ConnectionFields, (provider as IPersistableConnectionProvider)?.ConnectionInstructions) { Owner = this };
-        if (dialog.ShowDialog() != true) return;
+        var connectionValues = CollectConnectionValues(configurable, provider);
+        if (connectionValues is null) return;
         MainTabs.IsEnabled = false;
         activeAccountId = null;
         RemoteBox.ItemsSource = null;
         try
         {
             StatusText.Text = "새 인증 정보로 연결 확인 중…";
-            await configurable.ConnectAsync(dialog.Values, CancellationToken.None);
+            await configurable.ConnectAsync(connectionValues, CancellationToken.None);
             var folders = await provider.GetFoldersAsync(null, CancellationToken.None);
-            accountStore.Save(account, provider is IPersistableConnectionProvider persisted ? persisted.ExportConnectionValues() : dialog.Values);
+            accountStore.Save(account, provider is IPersistableConnectionProvider persisted ? persisted.ExportConnectionValues() : connectionValues);
             activeAccountId = account.Id;
             RemoteBox.ItemsSource = folders;
             StatusText.Text = "인증 정보를 갱신했습니다. 기존 동기화 항목은 그대로 이 계정을 사용합니다.";
@@ -321,6 +321,8 @@ public partial class MainWindow : Window
         RemoteBox.ItemsSource = null;
         if (ProvidersBox.SelectedItem is not IProvider p) return;
         RefreshAccounts(p.Id);
+        ConnectProviderButton.Content = p is IBrowserLoginProvider browser ? browser.LoginButtonText : "계정 연결";
+        UpdateAccountButton.Content = p is IBrowserLoginProvider ? "Google 다시 로그인" : "인증 정보 수정";
         if (p is IConfigurableProvider) { StatusText.Text = "새 계정을 연결하거나 저장 계정을 선택해 연결하세요."; return; }
         try
         {
@@ -329,22 +331,28 @@ public partial class MainWindow : Window
         }
         catch (Exception ex) { StatusText.Text = ex.Message; }
     }
+    private IReadOnlyDictionary<string, string>? CollectConnectionValues(IConfigurableProvider configurable, IProvider provider)
+    {
+        if (provider is IBrowserLoginProvider) return new Dictionary<string, string>();
+        var dialog = new ProviderConnectionWindow(configurable.ConnectionFields, (provider as IPersistableConnectionProvider)?.ConnectionInstructions) { Owner = this };
+        return dialog.ShowDialog() == true ? dialog.Values : null;
+    }
     private async void ConnectProvider(object sender, RoutedEventArgs e)
     {
         if (ProvidersBox.SelectedItem is not IConfigurableProvider configurable) { StatusText.Text = "이 Provider는 별도 연결 설정이 없습니다."; return; }
         var provider = (IProvider)configurable;
-        var dialog = new ProviderConnectionWindow(configurable.ConnectionFields, (provider as IPersistableConnectionProvider)?.ConnectionInstructions) { Owner = this };
-        if (dialog.ShowDialog() != true) return;
+        var connectionValues = CollectConnectionValues(configurable, provider);
+        if (connectionValues is null) return;
         MainTabs.IsEnabled = false;
         activeAccountId = null;
         RemoteBox.ItemsSource = null;
         try
         {
             StatusText.Text = "연결 확인 중…";
-            await configurable.ConnectAsync(dialog.Values, CancellationToken.None);
+            await configurable.ConnectAsync(connectionValues, CancellationToken.None);
             var folders = await provider.GetFoldersAsync(null, CancellationToken.None);
             var account = new SavedAccount(Guid.NewGuid(), provider.Id, $"{provider.DisplayName} · {DateTime.Now:MM-dd HH:mm:ss}");
-            accountStore.Save(account, provider is IPersistableConnectionProvider persisted ? persisted.ExportConnectionValues() : dialog.Values);
+            accountStore.Save(account, provider is IPersistableConnectionProvider persisted ? persisted.ExportConnectionValues() : connectionValues);
             RefreshAccounts(provider.Id);
             AccountsBox.SelectedItem = AccountsBox.Items.Cast<SavedAccount>().Single(x => x.Id == account.Id);
             activeAccountId = account.Id;

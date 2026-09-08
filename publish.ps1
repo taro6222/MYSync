@@ -17,6 +17,9 @@ Get-ChildItem $output -Recurse -File -Filter 'MYSync.Provider.Abstractions.dll' 
 Get-ChildItem $output -Recurse -File -Filter 'MYSync.Sync.Core.dll' | Remove-Item -Force
 Copy-Item docs/manual-test.md "$output/TEST-GUIDE.md" -Force
 Copy-Item docs/google-drive-setup.md "$output/google-drive-setup.md" -Force
+if (Test-Path -LiteralPath '.tools/google/oauth-client.json') {
+    Copy-Item -LiteralPath '.tools/google/oauth-client.json' -Destination "$output/plugins/GoogleDrive/oauth-client.json" -Force
+}
 $buildRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'build')) + [IO.Path]::DirectorySeparatorChar
 if (!$destination.StartsWith($buildRoot, [StringComparison]::OrdinalIgnoreCase) -or !$output.StartsWith($buildRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid publish path' }
 if (Test-Path -LiteralPath $destination) {

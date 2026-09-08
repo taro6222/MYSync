@@ -14,5 +14,8 @@ Get-ChildItem 'src/MYSync.Provider.WebDav/bin/Debug/net10.0' -File | Copy-Item -
 $googleDestination = 'src/MYSync.Desktop/bin/Debug/net10.0-windows/plugins/GoogleDrive'
 New-Item -ItemType Directory -Path $googleDestination -Force | Out-Null
 Get-ChildItem 'src/MYSync.Provider.GoogleDrive/bin/Debug/net10.0' -File | Copy-Item -Destination $googleDestination -Force
+if (Test-Path -LiteralPath '.tools/google/oauth-client.json') {
+    Copy-Item -LiteralPath '.tools/google/oauth-client.json' -Destination "$googleDestination/oauth-client.json" -Force
+}
 if ($Check) { & $dotnet run --project tests/MYSync.Checks --no-build -- $PSScriptRoot; if ($LASTEXITCODE -ne 0) { throw 'Checks failed' } }
 if ($Run) { & $dotnet 'src/MYSync.Desktop/bin/Debug/net10.0-windows/MYSync.Desktop.dll' }

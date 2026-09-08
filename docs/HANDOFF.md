@@ -4,6 +4,8 @@
 
 ## Google Drive 1단계
 
+최신 UI 보완: Google로 로그인/Google 다시 로그인 버튼을 사용하며 일반 사용자의 OAuth 입력창을 제거했다. IBrowserLoginProvider 선택 계약을 추가했다. 배포 공통 설정은 .tools/google/oauth-client.json에서 plugins/GoogleDrive/oauth-client.json으로 복사한다. 실제 공통 클라이언트 설정은 아직 미준비이므로 현 빌드는 설정 누락 안내를 표시한다. Google Cloud의 현재 열린 프로젝트를 변경하지 않았다.
+
 GoogleDrive Provider DLL에 공식 Google.Apis.Auth 1.76.0 기반 PKCE·브라우저 로그인, 갱신 토큰 재연결, 내 드라이브 폴더 탐색을 추가했다. 공통 선택 계약 IPersistableConnectionProvider로 생성 토큰을 기존 DPAPI 저장소에 넘긴다. SDK 평문 파일 저장은 사용하지 않는다. 호스트 연결 창은 Provider별 안내를 표시한다.
 
 읽기 전용 drive.readonly 권한만 요청한다. ITransferProvider는 아직 구현하지 않았고 Google 동기화 쌍 저장은 차단한다. deps.json을 게시 결과에서 보존해 Google SDK 의존성을 로드한다. 아래 초기 계획의 Google 미구현은 이제 전송·재귀 검사 범위에 해당한다.

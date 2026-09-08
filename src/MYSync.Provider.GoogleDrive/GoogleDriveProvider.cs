@@ -7,7 +7,7 @@ using MYSync.Sync.Core;
 namespace MYSync.Provider.GoogleDrive;
 
 /// <summary>First stage: OAuth and My Drive folder browsing. Does not claim transfer support.</summary>
-public sealed class GoogleDriveProvider : IProvider, IConfigurableProvider, IPersistableConnectionProvider
+public sealed class GoogleDriveProvider : IProvider, IConfigurableProvider, IPersistableConnectionProvider, IBrowserLoginProvider
 {
     private const string FolderType = "application/vnd.google-apps.folder";
     private readonly Func<IReadOnlyDictionary<string, string>, CancellationToken, Task<IGoogleSession>> connect;
@@ -24,10 +24,14 @@ public sealed class GoogleDriveProvider : IProvider, IConfigurableProvider, IPer
     public string DisplayName => "Google Drive (연결·탐색)";
     public ProviderCapabilities Capabilities => ProviderCapabilities.None;
     public bool IsConnected => session is not null;
-    public IReadOnlyList<ConnectionField> ConnectionFields => [new("client_id", "데스크톱 OAuth 클라이언트 ID"), new("client_secret", "OAuth 클라이언트 보안 비밀번호", true)];
-    public string ConnectionInstructions => "Google Cloud에서 Drive API와 데스크톱 OAuth 클라이언트를 설정하세요. 연결하면 기본 브라우저에서 Google에 로그인합니다. 현재는 내 드라이브 읽기·폴더 탐색 단계이며 전송은 지원하지 않습니다. 로그인 대기는 최대 3분입니다.";
+    public IReadOnlyList<ConnectionField> ConnectionFields => [];
+    public string LoginButtonText => "Google로 로그인";
+    public string ConnectionInstructions => "Google로 로그인을 누르면 브라우저에서 계정과 접근 권한을 선택합니다. 현재는 폴더 탐색만 지원합니다.";
     public async Task ConnectAsync(IReadOnlyDictionary<string, string> values, CancellationToken ct)
     {
+        // Saved accounts retain their original OAuth client binding. New logins use the distributor configuration.
+        if (!values.ContainsKey("client_id")) values = OAuthClientConfiguration.Load(Path.Combine(
+            Path.GetDirectoryName(typeof(GoogleDriveProvider).Assembly.Location)!, "oauth-client.json"));
         if (!values.TryGetValue("client_id", out var id) || string.IsNullOrWhiteSpace(id) || !id.EndsWith(".apps.googleusercontent.com", StringComparison.Ordinal)
             || id.Any(char.IsWhiteSpace) || !values.TryGetValue("client_secret", out var secret) || string.IsNullOrWhiteSpace(secret))
             throw new ArgumentException("Google 데스크톱 OAuth 클라이언트 ID와 보안 비밀번호를 입력하세요.");

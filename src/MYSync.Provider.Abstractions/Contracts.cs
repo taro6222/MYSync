@@ -12,6 +12,11 @@ public interface IProvider : IDisposable
 }
 public static class ProviderContract { public const int Version = 1; }
 
+public interface IBrowserLoginProvider
+{
+    string LoginButtonText { get; }
+}
+
 /// <summary>Optional: return credentials produced by authentication for encrypted host storage. Never log these values.</summary>
 public interface IPersistableConnectionProvider
 {
