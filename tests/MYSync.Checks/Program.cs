@@ -43,4 +43,5 @@ await ManagementChecks.Run(scratch);
 await ResilienceChecks.Run(scratch);
 await UnsupportedChecks.Run(scratch);
 await DiagnosticChecks.Run(scratch);
+await ScanCacheChecks.Run(scratch);
 Console.WriteLine("All checks passed.");
