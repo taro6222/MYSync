@@ -127,19 +127,20 @@ internal static class ResilienceChecks
             await settled.Task.WaitAsync(TimeSpan.FromSeconds(10));
             Check(cycles >= 3, "monitor stopped instead of retrying a transient failure");
         }
-        var stopped = 0; var attention = false;
-        await using (var giveUp = new SyncMonitor(monitorRoot, _ =>
+        var continued = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var retryCycles = 0;
+        await using (var keepEnabled = new SyncMonitor(monitorRoot, _ =>
         {
-            Interlocked.Increment(ref stopped);
-            return Task.FromResult(new ExecutionReport(false, ["계속되는 일시 오류"], true));
-        }, TimeSpan.FromHours(1), TimeSpan.Zero, 2, TimeSpan.FromMilliseconds(1)))
+            if (Interlocked.Increment(ref retryCycles) >= 4)
+            { continued.TrySetResult(); return Task.FromResult(new ExecutionReport(true, [])); }
+            throw new HttpRequestException("offline");
+        }, TimeSpan.FromMilliseconds(40), TimeSpan.Zero, 2, TimeSpan.FromMilliseconds(1)))
         {
-            giveUp.StatusChanged += status => attention |= status.State == MonitorState.NeedsAttention;
-            giveUp.Start();
-            await giveUp.Completion.WaitAsync(TimeSpan.FromSeconds(10));
-            Check(stopped == 3 && attention, "monitor did not stop after the transient retry budget");
+            keepEnabled.Start();
+            await continued.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Check(!keepEnabled.Completion.IsCompleted && retryCycles >= 4, "monitor disabled after transient retry budget");
         }
-        Console.WriteLine("PASS: monitor retries transient cycles within a bounded budget and then asks for attention");
+        Console.WriteLine("PASS: transient thrown connection errors recover after bounded fast retries and periodic waiting without disabling auto sync");
 
         var cacheArea = Path.Combine(scratch, "resilience", "local-cache");
         var cacheRoot = Path.Combine(cacheArea, "root"); Directory.CreateDirectory(cacheRoot);

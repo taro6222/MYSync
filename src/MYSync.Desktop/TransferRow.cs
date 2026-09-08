@@ -1,69 +1,72 @@
 using System.ComponentModel;
-using System.Runtime.CompilerServices;
+using System.Diagnostics;
+using MYSync.Sync.Core;
 using MYSync.Sync.Infrastructure;
 
 namespace MYSync.Desktop;
 
-/// <summary>Advisory view of one pair's current activity. Never used to decide sync state.</summary>
-public sealed class TransferRow(Guid pairId, string name) : INotifyPropertyChanged
+/// <summary>One operation. Stream bytes are advisory, not measured network throughput.</summary>
+public sealed class TransferRow(Guid pairId, string name, SyncProgress initial) : INotifyPropertyChanged
 {
-    private string state = "대기";
-    private string operation = "";
-    private string path = "";
-    private string progress = "";
-    private string transferred = "";
-    private string message = "";
-    private string updated = "";
+    private readonly Stopwatch clock = Stopwatch.StartNew();
+    private long attemptBytes;
     public Guid PairId { get; } = pairId;
+    public Guid ActivityId { get; } = initial.ActivityId;
+    public Guid RunId { get; } = initial.RunId;
     public string Name { get; } = name;
-    public string State { get => state; private set => Set(ref state, value); }
-    public string Operation { get => operation; private set => Set(ref operation, value); }
-    public string Path { get => path; private set => Set(ref path, value); }
-    public string Progress { get => progress; private set => Set(ref progress, value); }
-    public string Transferred { get => transferred; private set => Set(ref transferred, value); }
-    public string Message { get => message; private set => Set(ref message, value); }
-    public string Updated { get => updated; private set => Set(ref updated, value); }
-    public event PropertyChangedEventHandler? PropertyChanged;
-    public void Apply(SyncProgress report)
+    public string Path { get; } = initial.Path ?? "";
+    public bool IsFile { get; } = initial.Kind == EntryKind.File;
+    public string Operation { get; } = initial.Action switch
     {
+        SyncAction.Upload => "업로드", SyncAction.Download => "다운로드",
+        SyncAction.DeleteLocal => "로컬 삭제", SyncAction.DeleteRemote => "원격 삭제", _ => "충돌"
+    };
+    public string State { get; private set; } = "검사 중";
+    public string Message { get; private set; } = "";
+    public string Details => Path + "\n" + Message;
+    public string Started { get; } = DateTime.Now.ToString("MM-dd HH:mm:ss");
+    public string Finished { get; private set; } = "—";
+    public long Bytes { get; private set; }
+    public bool Applied { get; private set; }
+    public bool Done { get; private set; }
+    public string Transferred => Size(Bytes);
+    public string Speed => Bytes == 0 ? "—" : Size((long)(Bytes / Math.Max(clock.Elapsed.TotalSeconds, 0.001))) + "/s";
+    public string Duration => clock.Elapsed.ToString(@"hh\:mm\:ss");
+    public event PropertyChangedEventHandler? PropertyChanged;
+    public long Apply(SyncProgress report)
+    {
+        Message = report.Message;
+        var delta = 0L;
+        if (report.Event == TransferEvent.Retrying) attemptBytes = 0;
+        if (report.Phase == SyncPhase.Transferring)
+        {
+            delta = Math.Max(0, report.Bytes - attemptBytes);
+            Bytes += delta; attemptBytes = report.Bytes;
+        }
         State = report.Phase switch
         {
-            SyncPhase.Scanning => "검사 중",
-            SyncPhase.Transferring => "전송 중",
-            SyncPhase.Verifying => "확인 중",
-            SyncPhase.Attention => "확인 필요",
-            _ => "대기"
+            SyncPhase.Transferring => "전송 중", SyncPhase.Verifying => "검증 대기",
+            SyncPhase.Attention => "확인 필요", _ => "검사 중"
         };
-        Operation = report.Action switch
-        {
-            MYSync.Sync.Core.SyncAction.Upload => "업로드",
-            MYSync.Sync.Core.SyncAction.Download => "다운로드",
-            MYSync.Sync.Core.SyncAction.DeleteLocal => "로컬 삭제",
-            MYSync.Sync.Core.SyncAction.DeleteRemote => "원격 삭제",
-            MYSync.Sync.Core.SyncAction.Conflict => "충돌",
-            _ => ""
-        };
-        Path = report.Path ?? "";
-        Progress = report.Total > 0 ? $"{report.Completed}/{report.Total}" : "";
-        Transferred = report.Bytes > 0 ? Size(report.Bytes) : "";
-        Message = report.Message;
-        Updated = DateTime.Now.ToString("HH:mm:ss");
+        if (report.Event == TransferEvent.Applied) Applied = true;
+        if (report.Event == TransferEvent.Retrying) State = "재시도 대기";
+        if (report.Event is TransferEvent.Failed or TransferEvent.Cancelled)
+            Finish(report.Event == TransferEvent.Cancelled ? "중단" : "확인 필요");
+        Refresh();
+        return delta;
     }
-    public void Reset(string reason)
+    public void Finish(string state)
     {
-        State = "대기"; Operation = ""; Path = ""; Progress = ""; Transferred = "";
-        Message = reason; Updated = DateTime.Now.ToString("HH:mm:ss");
+        if (Done) return;
+        Done = true; State = state; clock.Stop();
+        Finished = DateTime.Now.ToString("MM-dd HH:mm:ss"); Refresh();
     }
-    private static string Size(long bytes) => bytes switch
+    public void Refresh() => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));
+    public static string Size(long bytes) => bytes switch
     {
         < 1024 => bytes + " B",
         < 1024 * 1024 => (bytes / 1024d).ToString("0.#") + " KB",
         < 1024L * 1024 * 1024 => (bytes / (1024d * 1024)).ToString("0.#") + " MB",
         _ => (bytes / (1024d * 1024 * 1024)).ToString("0.##") + " GB"
     };
-    private void Set(ref string field, string value, [CallerMemberName] string? property = null)
-    {
-        if (field == value) return;
-        field = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(property));
-    }
 }

@@ -57,6 +57,11 @@ internal static class ManagementChecks
         Check(reports.Any(x => x.Phase == SyncPhase.Transferring && x.Path == "big.bin" && x.Action == SyncAction.Upload), "no upload progress reported");
         Check(reports.Where(x => x.Path == "big.bin").Max(x => x.Bytes) == payload.Length, "reported bytes do not match the transferred file");
         Check(reports.Any(x => x.Phase == SyncPhase.Verifying), "convergence check not reported");
+        var history = new MYSync.Desktop.TransferHistory();
+        foreach (var item in reports) history.Apply(pair, "test", item);
+        Check(history.Rows.Single().Done && history.Rows.Single().State == "완료", "file history not finalized after verification");
+        Check(history.SessionBytes == payload.Length && history.CompletedFiles == 1, "history counts do not match real transfer");
+        Check(history.Rows.Single().Speed.EndsWith("/s") && history.Rows.Single().Finished != "—", "speed or timestamps absent");
         var last = reports[^1];
         Check(last.Phase == SyncPhase.Idle && last.Total == 1 && last.Completed == 1, "final progress did not report every operation as done");
         Check(await File.ReadAllBytesAsync(Path.Combine(rightRoot, "big.bin")) is { Length: 300_000 }, "file not transferred");

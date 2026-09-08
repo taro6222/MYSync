@@ -42,12 +42,20 @@ public sealed class SyncMonitor : IAsyncDisposable
         try
         {
             var transientCycles = 0;
+            var needsAttention = false;
             while (await signals.Reader.WaitToReadAsync(stop.Token))
             {
                 await Task.Delay(settle, stop.Token);
                 while (signals.Reader.TryRead(out _)) { }
+                if (needsAttention) continue;
                 Report(MonitorState.Running, "자동 동기화 검사·전송 중");
-                var report = await cycle(stop.Token);
+                ExecutionReport report;
+                try { report = await cycle(stop.Token); }
+                catch (OperationCanceledException) when (stop.IsCancellationRequested) { throw; }
+                catch (Exception ex)
+                {
+                    report = new(false, [ex.Message], SyncExecutor.Classify(ex) == MYSync.Sync.Core.SyncFailureKind.Transient);
+                }
                 if (!report.Converged)
                 {
                     // Only failures the engine classified as transient are retried, and only a bounded number of times.
@@ -58,7 +66,17 @@ public sealed class SyncMonitor : IAsyncDisposable
                         RequestScan();
                         continue;
                     }
-                    Report(MonitorState.NeedsAttention, "확인이 필요합니다. " + string.Join(" / ", report.Issues)); return;
+                    if (report.TransientOnly)
+                    {
+                        transientCycles = 0;
+                        Report(MonitorState.Watching, "연결 복구 대기 · 다음 정기 검사에서 재시도합니다. " + string.Join(" / ", report.Issues));
+                        await Task.Delay(interval, stop.Token);
+                        RequestScan();
+                        continue;
+                    }
+                    needsAttention = true;
+                    Report(MonitorState.NeedsAttention, "자동 켜짐 · 확인 대기. 일시정지 후 충돌·복구 또는 계정 설정을 확인하고 다시 시작하세요. " + string.Join(" / ", report.Issues));
+                    continue;
                 }
                 transientCycles = 0;
                 Report(MonitorState.Watching, report.Notices.Count == 0

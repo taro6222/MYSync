@@ -51,15 +51,16 @@ internal static class MonitorChecks
         { timerMonitor.Start(); await periodic.Task.WaitAsync(TimeSpan.FromSeconds(5)); }
         Console.WriteLine("PASS: real FileSystemWatcher event and periodic reconciliation without local changes");
 
-        var faultCalls = 0; var attention = false;
+        var faultCalls = 0; var attention = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         await using (var faultMonitor = new SyncMonitor(root, ct =>
         {
             Interlocked.Increment(ref faultCalls); return Task.FromResult(new ExecutionReport(false, ["conflict"]));
         }, TimeSpan.FromMilliseconds(20), TimeSpan.Zero))
         {
-            faultMonitor.StatusChanged += status => attention |= status.State == MonitorState.NeedsAttention;
-            faultMonitor.Start(); await faultMonitor.Completion.WaitAsync(TimeSpan.FromSeconds(5)); faultMonitor.RequestScan();
-            Check(faultCalls == 1 && attention, "failure retried automatically");
+            faultMonitor.StatusChanged += status => { if (status.State == MonitorState.NeedsAttention) attention.TrySetResult(); };
+            faultMonitor.Start(); await attention.Task.WaitAsync(TimeSpan.FromSeconds(5)); faultMonitor.RequestScan();
+            await Task.Delay(100);
+            Check(faultCalls == 1 && !faultMonitor.Completion.IsCompleted, "attention must keep the monitor enabled without repeating unsafe work");
         }
         var running = Signal(); var cancelled = false;
         var cancellable = new SyncMonitor(root, async ct =>
@@ -71,6 +72,6 @@ internal static class MonitorChecks
         }, settle: TimeSpan.Zero);
         cancellable.Start(); await running.Task.WaitAsync(TimeSpan.FromSeconds(5)); await cancellable.DisposeAsync();
         Check(cancelled && cancellable.Completion.IsCompleted, "running cycle not cancelled");
-        Console.WriteLine("PASS: unresolved conflict stops monitor; pause cancels active cycle");
+        Console.WriteLine("PASS: unresolved conflict keeps monitor enabled in attention state without repeating writes; pause cancels active cycle");
     }
 }

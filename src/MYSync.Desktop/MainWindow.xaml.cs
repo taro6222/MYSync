@@ -12,7 +12,8 @@ public sealed class MainViewModel
 {
     public ObservableCollection<IProvider> Providers { get; } = [];
     public ObservableCollection<SyncPair> Pairs { get; } = [];
-    public ObservableCollection<TransferRow> Transfers { get; } = [];
+    public TransferHistory History { get; } = new();
+    public ObservableCollection<TransferRow> Transfers => History.Rows;
 }
 public partial class MainWindow : Window
 {
@@ -24,8 +25,12 @@ public partial class MainWindow : Window
     private sealed record AutoRun(SyncMonitor Monitor, IProvider Provider, Mutex RunLock)
     {
         public Task? Stopping { get; set; }
+        public MonitorState State { get; set; } = MonitorState.Watching;
+        public string Message { get; set; } = "변경 감시 중";
     }
     private readonly Dictionary<Guid, AutoRun> autoRuns = [];
+    private readonly System.Windows.Threading.DispatcherTimer indicatorTimer = new() { Interval = TimeSpan.FromSeconds(1) };
+    private System.Drawing.Icon? appIcon;
     private bool closing;
     private bool exitRequested;
     private readonly DesktopPreferencesStore preferencesStore = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MYSync", "preferences.json"));
@@ -49,9 +54,13 @@ public partial class MainWindow : Window
         try { StartupBox.IsChecked = StartupRegistration.Enabled; }
         catch (Exception ex) { StatusText.Text = "로그인 설정 읽기 실패: " + ex.Message; }
         InitializeTray();
+        model.Pairs.CollectionChanged += (_, _) => UpdateIndicators();
+        indicatorTimer.Tick += (_, _) => { foreach (var row in model.Transfers.Where(x => !x.Done)) row.Refresh(); UpdateIndicators(); };
+        indicatorTimer.Start();
+        UpdateIndicators();
         if (catalog.Issues.Count > 0) StatusText.Text = string.Join(" / ", catalog.Issues.Select(x => x.Message));
         else if (model.Providers.Count == 0) StatusText.Text = "로드된 Provider가 없습니다. plugins 폴더에 설치하고 재시작하세요.";
-        Closed += (_, _) => { tray.Visible = false; tray.Dispose(); catalog.Dispose(); };
+        Closed += (_, _) => { tray.Visible = false; tray.Dispose(); appIcon?.Dispose(); indicatorTimer.Stop(); catalog.Dispose(); };
         Loaded += (_, _) =>
         {
             foreach (var pair in model.Pairs.Where(x => !x.Paused).ToArray())
@@ -84,7 +93,9 @@ public partial class MainWindow : Window
         }));
         menu.Items.Add(trayPause);
         menu.Items.Add("종료", null, (_, _) => Dispatcher.BeginInvoke(new Action(RequestExit)));
-        tray.Icon = System.Drawing.SystemIcons.Application; tray.Text = "MYSync · 준비됨"; tray.ContextMenuStrip = menu;
+        using (var iconStream = typeof(MainWindow).Assembly.GetManifestResourceStream("MYSync.Desktop.Assets.MYSync.ico")!)
+            appIcon = new System.Drawing.Icon(iconStream);
+        tray.Icon = appIcon; tray.Text = "MYSync · 준비됨"; tray.ContextMenuStrip = menu;
         tray.DoubleClick += (_, _) => Dispatcher.BeginInvoke(new Action(ShowFromTray)); tray.Visible = true;
     }
     public void ShowFromTray()
@@ -101,8 +112,9 @@ public partial class MainWindow : Window
     private void ExitApp(object sender, RoutedEventArgs e) => RequestExit();
     private void UpdateTray()
     {
-        trayStatus.Text = $"MYSync · 자동 감시 {autoRuns.Count}개";
+        trayStatus.Text = $"MYSync · 자동 켜짐 {autoRuns.Count}개 · 확인 대기 {autoRuns.Values.Count(x => x.State == MonitorState.NeedsAttention)}개";
         tray.Text = trayStatus.Text;
+        UpdateIndicators();
     }
     private void CloseToTrayChanged(object sender, RoutedEventArgs e)
     {
@@ -137,19 +149,24 @@ public partial class MainWindow : Window
         catch (Exception ex) { StatusText.Text = ex.Message; }
         finally { activeAccountId = null; RemoteBox.ItemsSource = null; }
     }
-    private TransferRow RowFor(SyncPair pair)
+    private IProgress<SyncProgress> ProgressFor(SyncPair pair) =>
+        new Progress<SyncProgress>(report =>
+        {
+            model.History.Apply(pair.Id, pair.RemoteFolderName, report);
+            UpdateIndicators();
+        });
+    private void UpdateIndicators()
     {
-        var existing = model.Transfers.FirstOrDefault(x => x.PairId == pair.Id);
-        if (existing is not null) return existing;
-        var created = new TransferRow(pair.Id, pair.RemoteFolderName + "  ⇄  " + pair.LocalPath);
-        model.Transfers.Add(created);
-        return created;
-    }
-    // Created on the UI thread so reports from background workers are marshalled back.
-    private IProgress<SyncProgress> ProgressFor(SyncPair pair)
-    {
-        var row = RowFor(pair);
-        return new Progress<SyncProgress>(row.Apply);
+        if (SyncIndicator is null) return;
+        SyncIndicator.Text = $"● 자동 {autoRuns.Count} / 연결 {model.Pairs.Count}";
+        var active = model.Transfers.Count(x => !x.Done);
+        FileIndicator.Text = $"작업 {active}개 · 완료 파일 {model.History.CompletedFiles}개";
+        BytesIndicator.Text = "처리 " + TransferRow.Size(model.History.SessionBytes);
+        TimeIndicator.Text = "최근 동기화 " + (model.History.LastSynchronized?.ToString("HH:mm:ss") ?? "—");
+        var waiting = autoRuns.Values.Where(x => x.State == MonitorState.NeedsAttention).ToArray();
+        if (waiting.Length > 0) SyncIndicator.Text += $" · 확인 대기 {waiting.Length}";
+        SyncIndicator.Foreground = waiting.Length > 0 ? System.Windows.Media.Brushes.DarkOrange : System.Windows.Media.Brushes.SeaGreen;
+        SyncIndicator.ToolTip = waiting.Length > 0 ? string.Join("\n", waiting.Select(x => x.Message)) : "자동 켜짐 상태에서는 완료 후에도 변경 감시를 유지합니다.";
     }
     private SavedAccount? SelectedAccount(out IConfigurableProvider? configurable)
     {
@@ -280,16 +297,12 @@ public partial class MainWindow : Window
                 return await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, ct, progress);
             });
             var run = new AutoRun(monitor, session, runLock);
-            monitor.StatusChanged += status => Dispatcher.BeginInvoke(new Action(async () =>
+            monitor.StatusChanged += status => Dispatcher.BeginInvoke(new Action(() =>
             {
                 if (!autoRuns.TryGetValue(pair.Id, out var current) || !ReferenceEquals(current, run)) return;
+                run.State = status.State; run.Message = pair.RemoteFolderName + " · " + status.Message;
                 StatusText.Text = pair.RemoteFolderName + " · " + status.Message;
-                if (status.State == MonitorState.NeedsAttention && !closing)
-                {
-                    try { await StopAuto(pair.Id, true); }
-                    catch (Exception ex) { StatusText.Text = ex.Message; }
-                    StatusText.Text = pair.RemoteFolderName + " · " + status.Message;
-                }
+                UpdateTray();
             }));
             SetPaused(pair.Id, false); autoRuns.Add(pair.Id, run); monitor.Start(); UpdateTray();
         }
@@ -313,7 +326,7 @@ public partial class MainWindow : Window
         {
             run.Provider.Dispose(); run.RunLock.ReleaseMutex(); run.RunLock.Dispose();
             autoRuns.Remove(id);
-            model.Transfers.FirstOrDefault(x => x.PairId == id)?.Reset("자동 동기화를 중지했습니다.");
+            model.History.Stop(id);
             UpdateTray();
             if (persistPause) SetPaused(id, true);
         }
@@ -466,8 +479,7 @@ public partial class MainWindow : Window
             store.Delete(pair.Id);
             var saved = model.Pairs.FirstOrDefault(x => x.Id == pair.Id);
             if (saved is not null) model.Pairs.Remove(saved);
-            var row = model.Transfers.FirstOrDefault(x => x.PairId == pair.Id);
-            if (row is not null) model.Transfers.Remove(row);
+            model.History.Stop(pair.Id);
             StatusText.Text = "동기화 연결을 삭제했습니다. 실제 파일과 복구 기록은 유지됩니다.";
         }
         catch (Exception ex) { StatusText.Text = "연결 삭제 실패: " + ex.Message; }

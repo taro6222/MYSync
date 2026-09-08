@@ -47,4 +47,5 @@ await ScanCacheChecks.Run(scratch);
 await GoogleDriveChecks.Run(root, scratch);
 await GoogleTransferChecks.Run(scratch);
 await PairManagementChecks.Run(scratch);
+TransferHistoryChecks.Run();
 Console.WriteLine("All checks passed.");
