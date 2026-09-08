@@ -12,6 +12,13 @@ public interface IProvider : IDisposable
 }
 public static class ProviderContract { public const int Version = 1; }
 
+/// <summary>Optional: return credentials produced by authentication for encrypted host storage. Never log these values.</summary>
+public interface IPersistableConnectionProvider
+{
+    IReadOnlyDictionary<string, string> ExportConnectionValues();
+    string ConnectionInstructions { get; }
+}
+
 public interface ITransferProvider
 {
     MYSync.Sync.Core.ISyncEndpoint OpenEndpoint(string remoteFolderId);

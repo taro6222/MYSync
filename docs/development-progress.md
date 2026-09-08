@@ -1,5 +1,15 @@
 # 개발 진행 상황
 
+## 2026-09-08 — Google Drive 로그인·탐색 기반
+
+- 전체 자동 검증 통과, 빌드 경고·오류 0개. Google SDK 의존성과 설정 안내를 포함한 Release 배포 생성 및 build/win-x64 교체 완료. 실제 Google 로그인·화면 조작 검증은 미실행.
+
+- GoogleDrive DLL과 Google.Apis.Auth 1.76.0 의존성 추가. PKCE 브라우저 OAuth 및 루프백 수신, 메모리 전용 SDK 저장소와 기존 DPAPI 저장소 연결.
+- 선택적 IPersistableConnectionProvider로 생성된 토큰을 호스트에 전달. 새 연결·정보 수정·재연결에서 암호화 저장.
+- Drive v3 폴더 조회·페이지 처리·ID 유지와 불완전/잘못된 범위 거부. 전송 미지원 상태를 표시하고 동기화 쌍 저장 차단.
+- SDK 의존성 때문에 게시 시 deps.json 보존. 샘플·WebDAV 동작 유지.
+- 모의 인증/HTTP, DPAPI 토큰 저장과 플러그인 SDK 로드 검증 추가. 실제 Google Cloud 설정·로그인 검증은 미실행. [google-drive-setup.md](google-drive-setup.md) 참고.
+
 ## 2026-09-08 — 로컬 캐시 만료와 정리
 
 - NAS 접속 불가로 실서버 검증 보류. 로컬 캐시에 해시 검증 시각과 기본 5분 유효기간 추가.

@@ -6,13 +6,13 @@ namespace MYSync.Desktop;
 public sealed class ProviderConnectionWindow : Window
 {
     public IReadOnlyDictionary<string, string> Values { get; private set; } = new Dictionary<string, string>();
-    public ProviderConnectionWindow(IReadOnlyList<ConnectionField> fields)
+    public ProviderConnectionWindow(IReadOnlyList<ConnectionField> fields, string? instructions = null)
     {
         Title = "클라우드 계정 연결"; Width = 520; Background = System.Windows.Media.Brushes.White; SizeToContent = SizeToContent.Height; ResizeMode = ResizeMode.NoResize;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         var panel = new StackPanel { Margin = new Thickness(24) };
         panel.Children.Add(new TextBlock { Text = "클라우드 계정 연결", FontSize = 24, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 8) });
-        panel.Children.Add(new TextBlock { Text = "주소와 포트를 입력하고 계정으로 로그인하세요.", Foreground = System.Windows.Media.Brushes.SlateGray, Margin = new Thickness(0, 0, 0, 12) });
+        panel.Children.Add(new TextBlock { Text = instructions ?? "주소와 포트를 입력하고 계정으로 로그인하세요.", TextWrapping = TextWrapping.Wrap, Foreground = System.Windows.Media.Brushes.SlateGray, Margin = new Thickness(0, 0, 0, 12) });
         var inputs = new Dictionary<string, Control>();
         foreach (var field in fields)
         {

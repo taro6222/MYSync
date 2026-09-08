@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><EnableDynamicLoading>true</EnableDynamicLoading></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../MYSync.Provider.Abstractions/MYSync.Provider.Abstractions.csproj" />
+    <PackageReference Include="Google.Apis.Auth" Version="1.76.0" />
+    <None Include="plugin.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

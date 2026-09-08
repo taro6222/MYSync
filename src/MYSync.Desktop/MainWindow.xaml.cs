@@ -174,7 +174,7 @@ public partial class MainWindow : Window
     {
         if (SelectedAccount(out var configurable) is not { } account) return;
         if (configurable is null || ProvidersBox.SelectedItem is not IProvider provider) { StatusText.Text = "이 Provider는 인증 정보 수정이 없습니다."; return; }
-        var dialog = new ProviderConnectionWindow(configurable.ConnectionFields) { Owner = this };
+        var dialog = new ProviderConnectionWindow(configurable.ConnectionFields, (provider as IPersistableConnectionProvider)?.ConnectionInstructions) { Owner = this };
         if (dialog.ShowDialog() != true) return;
         MainTabs.IsEnabled = false;
         activeAccountId = null;
@@ -184,7 +184,7 @@ public partial class MainWindow : Window
             StatusText.Text = "새 인증 정보로 연결 확인 중…";
             await configurable.ConnectAsync(dialog.Values, CancellationToken.None);
             var folders = await provider.GetFoldersAsync(null, CancellationToken.None);
-            accountStore.Save(account, dialog.Values);
+            accountStore.Save(account, provider is IPersistableConnectionProvider persisted ? persisted.ExportConnectionValues() : dialog.Values);
             activeAccountId = account.Id;
             RemoteBox.ItemsSource = folders;
             StatusText.Text = "인증 정보를 갱신했습니다. 기존 동기화 항목은 그대로 이 계정을 사용합니다.";
@@ -333,7 +333,7 @@ public partial class MainWindow : Window
     {
         if (ProvidersBox.SelectedItem is not IConfigurableProvider configurable) { StatusText.Text = "이 Provider는 별도 연결 설정이 없습니다."; return; }
         var provider = (IProvider)configurable;
-        var dialog = new ProviderConnectionWindow(configurable.ConnectionFields) { Owner = this };
+        var dialog = new ProviderConnectionWindow(configurable.ConnectionFields, (provider as IPersistableConnectionProvider)?.ConnectionInstructions) { Owner = this };
         if (dialog.ShowDialog() != true) return;
         MainTabs.IsEnabled = false;
         activeAccountId = null;
@@ -344,7 +344,7 @@ public partial class MainWindow : Window
             await configurable.ConnectAsync(dialog.Values, CancellationToken.None);
             var folders = await provider.GetFoldersAsync(null, CancellationToken.None);
             var account = new SavedAccount(Guid.NewGuid(), provider.Id, $"{provider.DisplayName} · {DateTime.Now:MM-dd HH:mm:ss}");
-            accountStore.Save(account, dialog.Values);
+            accountStore.Save(account, provider is IPersistableConnectionProvider persisted ? persisted.ExportConnectionValues() : dialog.Values);
             RefreshAccounts(provider.Id);
             AccountsBox.SelectedItem = AccountsBox.Items.Cast<SavedAccount>().Single(x => x.Id == account.Id);
             activeAccountId = account.Id;
@@ -378,6 +378,7 @@ public partial class MainWindow : Window
             activeAccountId = account.Id;
             RemoteBox.ItemsSource = folders;
             StatusText.Text = "저장 계정으로 연결했습니다.";
+            if (provider is IPersistableConnectionProvider persisted) accountStore.Save(account, persisted.ExportConnectionValues());
         }
         catch (System.Security.Cryptography.CryptographicException) { StatusText.Text = "이 Windows 사용자로 계정 정보를 복호화할 수 없습니다. 새 계정을 연결하세요."; }
         catch (Exception ex) { StatusText.Text = "재연결 실패: " + ex.Message; }
@@ -404,6 +405,7 @@ public partial class MainWindow : Window
         if (ProvidersBox.SelectedItem is not IProvider p || RemoteBox.SelectedItem is not RemoteFolder folder || !Directory.Exists(LocalPathBox.Text))
         { StatusText.Text = "Provider와 로컬·원격 폴더를 선택하세요."; return; }
         if (p is IConfigurableProvider && activeAccountId is null) { StatusText.Text = "계정을 먼저 연결하세요."; return; }
+        if (p is IConfigurableProvider && p is not ITransferProvider) { StatusText.Text = "이 Provider는 현재 연결·탐색 단계입니다. 전송 지원 후 동기화 폴더를 저장할 수 있습니다."; return; }
         var path = Path.TrimEndingDirectorySeparator(Path.GetFullPath(LocalPathBox.Text));
         if (model.Pairs.Any(x => Overlaps(x.LocalPath, path))) { StatusText.Text = "기존 동기화 폴더와 중복되거나 겹칩니다."; return; }
         try
@@ -421,4 +423,3 @@ public partial class MainWindow : Window
         return a.Equals(b, StringComparison.OrdinalIgnoreCase) || a.StartsWith(b + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) || b.StartsWith(a + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 }
-

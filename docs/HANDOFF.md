@@ -2,6 +2,14 @@
 
 최종 갱신: 2026-09-08. 로컬 작업 코드 기준이며 최신 변경의 커밋·푸시는 Git 상태로 확인하세요.
 
+## Google Drive 1단계
+
+GoogleDrive Provider DLL에 공식 Google.Apis.Auth 1.76.0 기반 PKCE·브라우저 로그인, 갱신 토큰 재연결, 내 드라이브 폴더 탐색을 추가했다. 공통 선택 계약 IPersistableConnectionProvider로 생성 토큰을 기존 DPAPI 저장소에 넘긴다. SDK 평문 파일 저장은 사용하지 않는다. 호스트 연결 창은 Provider별 안내를 표시한다.
+
+읽기 전용 drive.readonly 권한만 요청한다. ITransferProvider는 아직 구현하지 않았고 Google 동기화 쌍 저장은 차단한다. deps.json을 게시 결과에서 보존해 Google SDK 의존성을 로드한다. 아래 초기 계획의 Google 미구현은 이제 전송·재귀 검사 범위에 해당한다.
+
+사용자는 Google Cloud 설정을 아직 하지 않았다. [설정 가이드](google-drive-setup.md)를 작성했다. 실제 OAuth·갱신·화면 테스트는 미실행이며 모의 인증 세션과 HTTP로 검증한다. NAS 테스트도 보류 상태다. 다음은 Google 파일 검사·전송 엔드포인트와 권한 재동의 설계다.
+
 ## 2026-09-08 ETag 호환성 업데이트
 
 추가 진행: 사용자가 NAS 접속 불가로 실서버 테스트를 보류했다. NAS 없이 진행 가능한 로컬 검사 캐시를 보완했다. 캐시 유효기간은 기본 5분이며 만료 후 다음 검사에서 실물을 다시 해시한다. 정상 전체 검사 후 삭제된 경로 캐시를 정리한다. 디스크 영속 캐시·Google Drive는 아직 미구현이다.
