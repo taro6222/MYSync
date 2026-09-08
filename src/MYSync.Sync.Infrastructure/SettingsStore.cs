@@ -18,13 +18,29 @@ public sealed class SettingsStore
             command.CommandText = "ALTER TABLE SyncPairs ADD COLUMN AccountId TEXT NULL";
             command.ExecuteNonQuery();
         }
+        MigrateOptions();
+    }
+    private void MigrateOptions()
+    {
+        using var c = Open();
+        foreach (var (name, definition) in new[] { ("Exclusions", "TEXT NOT NULL DEFAULT ''"), ("SpeedLimitKiB", "INTEGER NOT NULL DEFAULT 0") })
+        {
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM pragma_table_info('SyncPairs') WHERE name=$name";
+            cmd.Parameters.AddWithValue("$name", name);
+            if ((long)cmd.ExecuteScalar()! == 0) { cmd.CommandText = $"ALTER TABLE SyncPairs ADD COLUMN {name} {definition}"; cmd.ExecuteNonQuery(); }
+        }
     }
     private SqliteConnection Open() { var c = new SqliteConnection(connectionString); c.Open(); return c; }
     public void Save(SyncPair pair)
     {
+        _ = new SyncExclusions(pair.Exclusions);
+        if (pair.SpeedLimitKiB < 0 || pair.SpeedLimitKiB > 1000000) throw new ArgumentOutOfRangeException(nameof(pair));
         using var connection = Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "INSERT INTO SyncPairs(Id,ProviderId,LocalPath,RemoteFolderId,RemoteFolderName,Paused,AccountId) VALUES ($id,$provider,$local,$remote,$name,$paused,$account) ON CONFLICT(Id) DO UPDATE SET ProviderId=$provider,LocalPath=$local,RemoteFolderId=$remote,RemoteFolderName=$name,Paused=$paused,AccountId=$account";
+        command.CommandText = "INSERT INTO SyncPairs(Id,ProviderId,LocalPath,RemoteFolderId,RemoteFolderName,Paused,AccountId,Exclusions,SpeedLimitKiB) VALUES ($id,$provider,$local,$remote,$name,$paused,$account,$exclude,$speed) ON CONFLICT(Id) DO UPDATE SET ProviderId=$provider,LocalPath=$local,RemoteFolderId=$remote,RemoteFolderName=$name,Paused=$paused,AccountId=$account,Exclusions=$exclude,SpeedLimitKiB=$speed";
+        command.Parameters.AddWithValue("$exclude", pair.Exclusions);
+        command.Parameters.AddWithValue("$speed", pair.SpeedLimitKiB);
         command.Parameters.AddWithValue("$id", pair.Id.ToString());
         command.Parameters.AddWithValue("$provider", pair.ProviderId);
         command.Parameters.AddWithValue("$local", pair.LocalPath);
@@ -46,10 +62,10 @@ public sealed class SettingsStore
     {
         using var connection = Open();
         using var command = connection.CreateCommand();
-        command.CommandText = "SELECT Id,ProviderId,LocalPath,RemoteFolderId,RemoteFolderName,Paused,AccountId FROM SyncPairs ORDER BY rowid";
+        command.CommandText = "SELECT Id,ProviderId,LocalPath,RemoteFolderId,RemoteFolderName,Paused,AccountId,Exclusions,SpeedLimitKiB FROM SyncPairs ORDER BY rowid";
         using var reader = command.ExecuteReader();
         var result = new List<SyncPair>();
-        while (reader.Read()) result.Add(new(Guid.Parse(reader.GetString(0)), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetBoolean(5), reader.IsDBNull(6) ? null : Guid.Parse(reader.GetString(6))));
+        while (reader.Read()) result.Add(new(Guid.Parse(reader.GetString(0)), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetString(4), reader.GetBoolean(5), reader.IsDBNull(6) ? null : Guid.Parse(reader.GetString(6)), reader.GetString(7), reader.GetInt64(8)));
         return result;
     }
 }

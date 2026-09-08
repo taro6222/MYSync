@@ -89,6 +89,16 @@ internal static class GoogleTransferChecks
         using var provider = new GoogleDriveProvider((_, _) => Task.FromResult<IGoogleSession>(new Session()), () => server);
         await provider.ConnectAsync(new Dictionary<string, string> { ["client_id"] = "test.apps.googleusercontent.com", ["client_secret"] = "test" }, default);
         var remote = provider.OpenEndpoint("root");
+        server.Seed("excluded", "secret.bak", "root", new string('x', 32768));
+        ((ISyncPolicyEndpoint)remote).Policy = new("*.bak", 64);
+        var filtered = await remote.ScanAsync(default);
+        Check(filtered.IsComplete && filtered.Entries.All(x => x.Path != "secret.bak") && filtered.Unsupported.Any(x => x.Path == "secret.bak"), "Google exclusion failed");
+        ((ISyncPolicyEndpoint)remote).Policy = new("", 64);
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        await remote.ScanAsync(default);
+        Check(timer.Elapsed >= TimeSpan.FromMilliseconds(450), "Google HTTP download bypassed bandwidth limit");
+        ((ISyncPolicyEndpoint)remote).Policy = new();
+        server.Items.Remove("excluded");
         var area = Path.Combine(scratch, "google-transfer"); var localRoot = Path.Combine(area, "local"); Directory.CreateDirectory(Path.Combine(localRoot, "한글"));
         await File.WriteAllTextAsync(Path.Combine(localRoot, "한글", "local.txt"), "local");
         var local = new LocalEndpoint(localRoot, Path.Combine(area, "recovery")); var pair = Guid.NewGuid();

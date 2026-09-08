@@ -7,7 +7,7 @@ public sealed record FileFingerprint(long Length, DateTime LastWriteUtc, string 
 /// are unchanged. The cache is advisory only: every write and delete re-hashes the real file before acting,
 /// so a stale entry can delay detecting a change but can never make the endpoint act on the wrong content.
 /// </summary>
-public sealed class LocalScanner(IDictionary<string, FileFingerprint>? cache = null, TimeProvider? clock = null, TimeSpan? cacheLifetime = null)
+public sealed class LocalScanner(IDictionary<string, FileFingerprint>? cache = null, TimeProvider? clock = null, TimeSpan? cacheLifetime = null, SyncExclusions? exclusions = null)
 {
     private readonly TimeProvider time = clock ?? TimeProvider.System;
     private readonly TimeSpan lifetime = cacheLifetime ?? TimeSpan.FromMinutes(5);
@@ -35,8 +35,10 @@ public sealed class LocalScanner(IDictionary<string, FileFingerprint>? cache = n
                     cancellationToken.ThrowIfCancellationRequested();
                     try
                     {
-                        var attributes = File.GetAttributes(path);
                         var relative = Path.GetRelativePath(root, path).Replace('\\', '/');
+                        if (exclusions?.Matches(relative, Directory.Exists(path) ? EntryKind.Directory : EntryKind.File) == true)
+                        { unsupported.Add(new(relative, "연결별 제외 규칙")); continue; }
+                        var attributes = File.GetAttributes(path);
                         if (Path.GetFileName(path).Equals(".MYSync-recovery", StringComparison.OrdinalIgnoreCase))
                         { unsupported.Add(new(relative, "MYSync 복구 보관함은 동기화하지 않습니다.")); continue; }
                         // Reported, not an error: one link must not stop the whole pair, and its target is never followed.

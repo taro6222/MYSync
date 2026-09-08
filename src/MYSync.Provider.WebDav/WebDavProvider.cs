@@ -54,7 +54,7 @@ public sealed partial class WebDavProvider : IProvider, IConfigurableProvider, I
             builder.Port = port;
         }
         var candidateRoot = new Uri(builder.Uri.AbsoluteUri.TrimEnd('/') + "/");
-        var candidate = new HttpClient(new DiagnosticHandler(handlerFactory())) { Timeout = TimeSpan.FromSeconds(30), MaxResponseContentBufferSize = 4 * 1024 * 1024 };
+        var candidate = new HttpClient(new RequestTimeoutHandler(new DiagnosticHandler(handlerFactory()))) { Timeout = Timeout.InfiniteTimeSpan, MaxResponseContentBufferSize = 4 * 1024 * 1024 };
         candidate.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(username + ":" + password)));
         try
         {

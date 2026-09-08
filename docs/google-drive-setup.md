@@ -1,5 +1,10 @@
 # Google Drive 로그인 설정
 
+## 오류 알림·개별 정책·OAuth 배포 업데이트 (2026-09-08)
+
+트레이 오류 알림 클릭 시 해당 오류 페이지로 이동한다. 연결별 파일·폴더 제외와 합산 전송 속도(KiB/s, 0=무제한)를 설정할 수 있다. Google 설정은 DLL 내부 리소스로 전환해 배포 폴더에 oauth-client.json을 복사하지 않는다. 내장 리소스는 추출 가능하므로 비밀 보장으로 간주하지 않는다. [설정 및 테스트](sync-options-and-alerts.md), [OAuth 배포와 보안 한계](oauth-distribution.md)를 참고한다. 아래 구버전 설명과 다르면 이 업데이트를 우선한다.
+
+
 전송 단계 업데이트: 이제 동기화 쌍 저장과 5 MiB 이하 파일 전송을 지원한다. 공통 OAuth 설정은 준비됐고 사용자가 로그인·탐색 성공을 확인했다. 전송에는 `https://www.googleapis.com/auth/drive` 범위를 추가하고 기존 계정에서 Google 다시 로그인해야 한다. 아래 읽기 전용·탐색 전용 문구는 초기 안내이며 [전송 안내](google-drive-transfer.md)를 우선한다.
 
 일반 사용자는 Google Cloud 설정 없이 **Google로 로그인** 버튼으로 연결한다. 공통 OAuth 설정은 앱 배포자가 한 번 준비한다. 현재 Google Drive는 로그인·폴더 탐색만 지원하며 파일 전송은 후속 단계다.

@@ -48,4 +48,11 @@ await GoogleDriveChecks.Run(root, scratch);
 await GoogleTransferChecks.Run(scratch);
 await PairManagementChecks.Run(scratch);
 TransferHistoryChecks.Run();
+await PolicyChecks.Run(scratch);
+if (File.Exists(Path.Combine(root, ".tools", "google", "oauth-client.json")))
+{
+    var embedded = MYSync.Provider.GoogleDrive.OAuthClientConfiguration.LoadEmbedded();
+    if (!embedded.ContainsKey("client_id") || !embedded.ContainsKey("client_secret")) throw new Exception("Embedded OAuth configuration missing");
+    Console.WriteLine("PASS: embedded Google OAuth configuration loads without a plugin-side JSON");
+}
 Console.WriteLine("All checks passed.");

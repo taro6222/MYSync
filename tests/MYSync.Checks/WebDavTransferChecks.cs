@@ -90,6 +90,16 @@ internal static class WebDavTransferChecks
         using var provider = new WebDavProvider(() => server);
         await provider.ConnectAsync(new Dictionary<string,string> { ["url"] = "https://dav.test/root/", ["username"] = "test", ["password"] = "test-only" }, default);
         var remote = ((ITransferProvider)provider).OpenEndpoint("https://dav.test/root/");
+        server.Seed("/root/secret.bak", new string('x', 32768));
+        ((ISyncPolicyEndpoint)remote).Policy = new("*.bak", 64);
+        var filtered = await remote.ScanAsync(default);
+        Check(filtered.IsComplete && filtered.Entries.All(x => x.Path != "secret.bak") && filtered.Unsupported.Any(x => x.Path == "secret.bak"), "WebDAV exclusion failed");
+        ((ISyncPolicyEndpoint)remote).Policy = new("", 64);
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+        await remote.ScanAsync(default);
+        Check(timer.Elapsed >= TimeSpan.FromMilliseconds(450), "WebDAV HTTP download bypassed bandwidth limit");
+        ((ISyncPolicyEndpoint)remote).Policy = new();
+        server.Files.Remove("/root/secret.bak");
         var area = Path.Combine(scratch, "webdav-transfer"); var localRoot = Path.Combine(area, "local"); Directory.CreateDirectory(localRoot);
         await File.WriteAllTextAsync(Path.Combine(localRoot, "local.txt"), "local");
         var local = new LocalEndpoint(localRoot, Path.Combine(area, "recovery"));

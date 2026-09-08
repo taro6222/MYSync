@@ -12,6 +12,7 @@ public sealed class MainViewModel
 {
     public ObservableCollection<IProvider> Providers { get; } = [];
     public ObservableCollection<SyncPair> Pairs { get; } = [];
+    public ObservableCollection<SyncAlert> Alerts { get; } = [];
     public TransferHistory History { get; } = new();
     public ObservableCollection<TransferRow> Transfers => History.Rows;
 }
@@ -21,6 +22,11 @@ public partial class MainWindow : Window
     private readonly SettingsStore store;
     private readonly AccountStore accountStore;
     private Guid? activeAccountId;
+    private string draftExclusions = "";
+    private long draftSpeed;
+    private readonly Queue<SyncAlert> notificationQueue = new();
+    private readonly Dictionary<Guid, string> lastAlert = [];
+    private SyncAlert? visibleAlert;
     private readonly MainViewModel model = new();
     private sealed record AutoRun(SyncMonitor Monitor, IProvider Provider, Mutex RunLock)
     {
@@ -64,7 +70,7 @@ public partial class MainWindow : Window
         Loaded += (_, _) =>
         {
             foreach (var pair in model.Pairs.Where(x => !x.Paused).ToArray())
-            { try { StartAuto(pair); } catch (Exception ex) { SetPaused(pair.Id, true); StatusText.Text = ex.Message; } }
+            { try { StartAuto(pair); } catch (Exception ex) { SetPaused(pair.Id, true); StatusText.Text = ex.Message; AddAlert(pair, ex.Message); } }
             if (Environment.GetCommandLineArgs().Contains("--background", StringComparer.Ordinal)) Hide();
         };
         Closing += async (_, e) =>
@@ -96,6 +102,12 @@ public partial class MainWindow : Window
         using (var iconStream = typeof(MainWindow).Assembly.GetManifestResourceStream("MYSync.Desktop.Assets.MYSync.ico")!)
             appIcon = new System.Drawing.Icon(iconStream);
         tray.Icon = appIcon; tray.Text = "MYSync · 준비됨"; tray.ContextMenuStrip = menu;
+        tray.BalloonTipClicked += (_, _) =>
+        {
+            var target = visibleAlert;
+            Dispatcher.BeginInvoke(new Action(() => { if (target is not null) { ShowFromTray(); MainTabs.SelectedItem = AlertsTab; if (!model.Alerts.Contains(target)) model.Alerts.Insert(0, target); AlertsBox.SelectedItem = target; } }));
+        };
+        tray.BalloonTipClosed += (_, _) => Dispatcher.BeginInvoke(new Action(() => { visibleAlert = null; ShowNextNotification(); }));
         tray.DoubleClick += (_, _) => Dispatcher.BeginInvoke(new Action(ShowFromTray)); tray.Visible = true;
     }
     public void ShowFromTray()
@@ -131,7 +143,7 @@ public partial class MainWindow : Window
         }
     }
     private void ShowAdd(object sender, RoutedEventArgs e) => MainTabs.SelectedIndex = 1;
-    private void OpenSync(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new SyncRunWindow(pair, provider, accountStore, recovery, journalPath, ProgressFor(pair)));
+    private void OpenSync(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new SyncRunWindow(pair, provider, accountStore, recovery, journalPath, ProgressFor(pair, true)));
     private void OpenResolve(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new ResolveWindow(pair, provider, accountStore, recovery, journalPath));
     private void OpenPairWindow(object sender, Func<SyncPair, IProvider, string, string, Window> create)
     {
@@ -149,10 +161,11 @@ public partial class MainWindow : Window
         catch (Exception ex) { StatusText.Text = ex.Message; }
         finally { activeAccountId = null; RemoteBox.ItemsSource = null; }
     }
-    private IProgress<SyncProgress> ProgressFor(SyncPair pair) =>
+    private IProgress<SyncProgress> ProgressFor(SyncPair pair, bool notify = false) =>
         new Progress<SyncProgress>(report =>
         {
             model.History.Apply(pair.Id, pair.RemoteFolderName, report);
+            if (notify && report.Phase == SyncPhase.Attention && report.ActivityId == Guid.Empty) AddAlert(pair, report.Message);
             UpdateIndicators();
         });
     private void UpdateIndicators()
@@ -256,7 +269,7 @@ public partial class MainWindow : Window
             if (autoRuns.ContainsKey(pair.Id)) await StopAuto(pair.Id, true);
             else StartAuto(pair);
         }
-        catch (Exception ex) { StatusText.Text = "자동 동기화 설정 실패: " + ex.Message; }
+        catch (Exception ex) { StatusText.Text = "자동 동기화 설정 실패: " + ex.Message; AddAlert(pair, ex.Message); }
         finally { if (!closing) MainTabs.IsEnabled = true; }
     }
     private void StartAuto(SyncPair pair)
@@ -277,7 +290,9 @@ public partial class MainWindow : Window
             if (session is not ITransferProvider transfer || session is not IConfigurableProvider configurable) throw new InvalidOperationException("이 Provider는 자동 전송을 지원하지 않습니다.");
             var journalPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MYSync", "journals", pair.Id.ToString("N") + ".db");
             var journal = new SyncJournal(journalPath); journal.RecoverInterrupted();
-            var local = new LocalEndpoint(pair.LocalPath, recovery);
+            var policy = new SyncPolicy(pair.Exclusions, pair.SpeedLimitKiB);
+            journal.SkipExcluded(pair.Id, policy.Exclusions);
+            var local = new PolicyEndpoint(new LocalEndpoint(pair.LocalPath, recovery), policy);
             var progress = ProgressFor(pair);
             ISyncEndpoint? remote = null;
             monitor = new SyncMonitor(pair.LocalPath, async ct =>
@@ -287,7 +302,7 @@ public partial class MainWindow : Window
                     var values = accountStore.ReadValues(account);
                     try { await configurable.ConnectAsync(values, ct); }
                     finally { values.Clear(); }
-                    remote = transfer.OpenEndpoint(pair.RemoteFolderId);
+                    remote = new PolicyEndpoint(transfer.OpenEndpoint(pair.RemoteFolderId), policy);
                 }
                 var left = await local.ScanAsync(ct); var right = await remote.ScanAsync(ct);
                 var plan = SyncPlanner.Compare(left, right, journal.ReadBaseline(pair.Id));
@@ -300,6 +315,8 @@ public partial class MainWindow : Window
             monitor.StatusChanged += status => Dispatcher.BeginInvoke(new Action(() =>
             {
                 if (!autoRuns.TryGetValue(pair.Id, out var current) || !ReferenceEquals(current, run)) return;
+                if (status.State == MonitorState.NeedsAttention) AddAlert(pair, status.Message);
+                else if (status.State == MonitorState.Watching) lastAlert.Remove(pair.Id);
                 run.State = status.State; run.Message = pair.RemoteFolderName + " · " + status.Message;
                 StatusText.Text = pair.RemoteFolderName + " · " + status.Message;
                 UpdateTray();
@@ -436,7 +453,7 @@ public partial class MainWindow : Window
         { StatusText.Text = "드라이브 전체 또는 복구 보관함 대신 일반 하위 폴더를 선택하세요."; return; }
         try
         {
-            var pair = new SyncPair(Guid.NewGuid(), p.Id, path, folder.Id, folder.Name, true, activeAccountId);
+            var pair = new SyncPair(Guid.NewGuid(), p.Id, path, folder.Id, folder.Name, true, activeAccountId, draftExclusions, draftSpeed);
             store.Save(pair); model.Pairs.Add(pair); MainTabs.SelectedIndex = 0;
             StatusText.Text = "저장했습니다. 검사·실행 또는 자동 시작을 선택하세요.";
         }
@@ -484,6 +501,70 @@ public partial class MainWindow : Window
         }
         catch (Exception ex) { StatusText.Text = "연결 삭제 실패: " + ex.Message; }
         finally { MainTabs.IsEnabled = true; }
+    }
+    private void EditDraftOptions(object sender, RoutedEventArgs e)
+    {
+        var dialog = new PairOptionsWindow(draftExclusions, draftSpeed) { Owner = this };
+        if (dialog.ShowDialog() != true) return;
+        draftExclusions = dialog.Exclusions; draftSpeed = dialog.SpeedLimitKiB;
+        StatusText.Text = "새 연결의 제외·속도 설정을 적용했습니다.";
+    }
+    private async void EditPairOptions(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not SyncPair pair) return;
+        var dialog = new PairOptionsWindow(pair.Exclusions, pair.SpeedLimitKiB) { Owner = this };
+        if (dialog.ShowDialog() != true) return;
+        MainTabs.IsEnabled = false;
+        try
+        {
+            await StopAuto(pair.Id, true);
+            var updated = pair with { Exclusions = dialog.Exclusions, SpeedLimitKiB = dialog.SpeedLimitKiB, Paused = true };
+            store.Save(updated);
+            var index = model.Pairs.ToList().FindIndex(x => x.Id == pair.Id);
+            if (index >= 0) model.Pairs[index] = updated;
+            StatusText.Text = "제외·속도 설정을 저장했습니다. 자동 시작을 누르면 새 설정으로 감시합니다.";
+        }
+        catch (Exception ex) { StatusText.Text = "설정 저장 실패: " + ex.Message; }
+        finally { MainTabs.IsEnabled = true; }
+    }
+    private void AddAlert(SyncPair pair, string message)
+    {
+        if (lastAlert.TryGetValue(pair.Id, out var previous) && previous == message) return;
+        lastAlert[pair.Id] = message;
+        var alert = new SyncAlert(pair.Id, pair.RemoteFolderName, message);
+        model.Alerts.Insert(0, alert);
+        if (model.Alerts.Count > 200) model.Alerts.RemoveAt(model.Alerts.Count - 1);
+        if (notificationQueue.Count < 200) notificationQueue.Enqueue(alert);
+        ShowNextNotification();
+    }
+    private void ShowNextNotification()
+    {
+        if (closing || visibleAlert is not null || !notificationQueue.TryDequeue(out var alert)) return;
+        visibleAlert = alert;
+        tray.ShowBalloonTip(6000, "MYSync · 확인 필요", (alert.Name.Length > 60 ? alert.Name[..60] : alert.Name) + " · 오류가 있습니다. 클릭하여 확인하세요.", System.Windows.Forms.ToolTipIcon.Warning);
+    }
+    private async void ResolveAlert(object sender, RoutedEventArgs e)
+    {
+        if (AlertsBox.SelectedItem is not SyncAlert alert) return;
+        var pair = model.Pairs.FirstOrDefault(x => x.Id == alert.PairId);
+        if (pair is null) { StatusText.Text = "삭제된 연결의 과거 오류입니다."; return; }
+        MainTabs.IsEnabled = false;
+        try
+        {
+            await StopAuto(pair.Id, true);
+            OpenPairWindow(new Button { DataContext = pair }, (p, provider, recovery, journal) => new ResolveWindow(p, provider, accountStore, recovery, journal));
+        }
+        catch (Exception ex) { StatusText.Text = ex.Message; }
+        finally { MainTabs.IsEnabled = true; }
+    }
+    private void AlertAccount(object sender, RoutedEventArgs e)
+    {
+        if (AlertsBox.SelectedItem is not SyncAlert alert) return;
+        var pair = model.Pairs.FirstOrDefault(x => x.Id == alert.PairId);
+        if (pair is null) { StatusText.Text = "삭제된 연결의 과거 오류입니다."; return; }
+        MainTabs.SelectedIndex = 1;
+        ProvidersBox.SelectedItem = model.Providers.FirstOrDefault(x => x.Id == pair.ProviderId);
+        AccountsBox.SelectedItem = AccountsBox.Items.Cast<SavedAccount>().FirstOrDefault(x => x.Id == pair.AccountId);
     }
     private static bool Overlaps(string a, string b)
     {

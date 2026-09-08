@@ -18,9 +18,7 @@ Get-ChildItem $output -Recurse -File -Filter 'MYSync.Sync.Core.dll' | Remove-Ite
 Copy-Item docs/manual-test.md "$output/TEST-GUIDE.md" -Force
 Copy-Item docs/google-drive-setup.md "$output/google-drive-setup.md" -Force
 Copy-Item docs/google-drive-transfer.md "$output/google-drive-transfer.md" -Force
-if (Test-Path -LiteralPath '.tools/google/oauth-client.json') {
-    Copy-Item -LiteralPath '.tools/google/oauth-client.json' -Destination "$output/plugins/GoogleDrive/oauth-client.json" -Force
-}
+# OAuth configuration is embedded in the Google plugin; no loose JSON is published.
 $buildRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'build')) + [IO.Path]::DirectorySeparatorChar
 if (!$destination.StartsWith($buildRoot, [StringComparison]::OrdinalIgnoreCase) -or !$output.StartsWith($buildRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Invalid publish path' }
 if (Test-Path -LiteralPath $destination) {

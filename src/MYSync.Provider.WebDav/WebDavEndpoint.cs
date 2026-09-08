@@ -14,8 +14,9 @@ public sealed partial class WebDavProvider
         var folder = Validate(root!, remoteFolderId);
         return new DavEndpoint(active, new Uri(folder.AbsoluteUri.TrimEnd('/') + "/"));
     }
-    private sealed class DavEndpoint(HttpClient http, Uri scope) : ISyncEndpoint
+    private sealed class DavEndpoint(HttpClient http, Uri scope) : ISyncEndpoint, ISyncPolicyEndpoint
     {
+        public SyncPolicy Policy { get; set; } = new();
         private const string StagingPrefix = ".mysync-upload-";
         // Skips re-downloading a file whose strong ETag and length are unchanged since we hashed it in this session.
         // Advisory only: every read, replace and delete downloads and re-verifies the content before acting.
@@ -29,10 +30,10 @@ public sealed partial class WebDavProvider
         }
         public async Task<ScanResult> ScanAsync(CancellationToken ct)
         {
-            var entries = new List<SyncEntry>();
-            try { await Visit(scope, 0); return new(entries, []); }
+            var entries = new List<SyncEntry>(); var notices = new List<UnsupportedItem>();
+            try { await Visit(scope, 0); return new(entries, [], notices); }
             catch (Exception ex) when (ex is IOException or HttpRequestException or System.Xml.XmlException or InvalidOperationException)
-            { return new(entries, ["원격 검사 실패: " + ex.Message]); }
+            { return new(entries, ["원격 검사 실패: " + ex.Message], notices); }
             async Task Visit(Uri directory, int depth)
             {
                 if (depth > 128 || entries.Count > 100000) throw new WebDavException("원격 검사 한도를 초과했습니다.");
@@ -40,6 +41,7 @@ public sealed partial class WebDavProvider
                 {
                     var path = string.Join('/', scope.MakeRelativeUri(item.Uri).ToString().TrimEnd('/').Split('/').Select(Uri.UnescapeDataString));
                     Resolve(path);
+                    if (Policy.Exclusions.Matches(path, item.IsFolder ? EntryKind.Directory : EntryKind.File)) { notices.Add(new(path, "연결별 제외 규칙")); continue; }
                     if (path.Split('/').Last().StartsWith(StagingPrefix, StringComparison.Ordinal)) throw new WebDavException("완료되지 않은 업로드 파일을 확인하세요: " + path);
                     if (item.IsFolder)
                     {
@@ -72,6 +74,7 @@ public sealed partial class WebDavProvider
             }
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
             if (knownTag is not null) request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(knownTag));
+            request.Options.Set(RequestTimeoutHandler.Streaming, true);
             using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
             if (response.StatusCode != HttpStatusCode.OK) throw Failure("다운로드", response.StatusCode);
             var responseTag = response.Headers.ETag;
@@ -80,7 +83,9 @@ public sealed partial class WebDavProvider
             var stream = Temp();
             try
             {
-                await response.Content.CopyToAsync(stream, timeout.Token); stream.Position = 0;
+                timeout.CancelAfter(response.Content.Headers.ContentLength is long size ? Policy.Bandwidth.TimeoutFor(size) : Policy.Bandwidth.BytesPerSecond == 0 ? TimeSpan.FromMinutes(5) : Timeout.InfiniteTimeSpan);
+                await using var input = await response.Content.ReadAsStreamAsync(timeout.Token);
+                await Policy.Bandwidth.CopyAsync(input, stream, timeout.Token); stream.Position = 0;
                 var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, timeout.Token)); stream.Position = 0;
                 return (stream, hash, knownTag ?? ValidStrongTag(responseTag?.ToString()), stream.Length);
             }
@@ -135,7 +140,8 @@ public sealed partial class WebDavProvider
             {
                 using (var put = new HttpRequestMessage(HttpMethod.Put, temporary))
                 {
-                    put.Headers.TryAddWithoutValidation("If-None-Match", "*"); put.Content = new StreamContent(staged);
+                    put.Headers.TryAddWithoutValidation("If-None-Match", "*"); put.Content = Policy.Bandwidth.Limit(new StreamContent(staged));
+                    put.Options.Set(RequestTimeoutHandler.Budget, Policy.Bandwidth.TimeoutFor(staged.Length));
                     using var response = await http.SendAsync(put, ct);
                     if (response.StatusCode != HttpStatusCode.Created) throw Failure("임시 업로드", response.StatusCode);
                 }

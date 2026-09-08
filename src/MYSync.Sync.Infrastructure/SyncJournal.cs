@@ -66,6 +66,21 @@ public sealed class SyncJournal
             reader.IsDBNull(5) ? null : reader.GetString(5)));
         return jobs;
     }
+    public void SkipExcluded(Guid pair, SyncExclusions exclusions)
+    {
+        foreach (var job in ReadJobs(pair).Where(x => x.State != JobState.Completed))
+        {
+            if (job.State == JobState.Running) throw new InvalidOperationException("실행 중인 작업에는 제외 규칙을 변경할 수 없습니다.");
+            if (exclusions.Matches(job.Operation.Path, (job.Operation.ExpectedLocal ?? job.Operation.ExpectedRemote)?.Kind ?? EntryKind.File))
+            {
+                using var c = Open(); using var cmd = c.CreateCommand();
+                cmd.CommandText = "UPDATE Jobs SET State=$done,FailureReason=$reason,FailureKind=NULL WHERE Id=$id AND PairId=$pair AND State<>$running";
+                cmd.Parameters.AddWithValue("$done", (int)JobState.Completed); cmd.Parameters.AddWithValue("$reason", "사용자 제외 규칙으로 실행하지 않음");
+                cmd.Parameters.AddWithValue("$id", job.Id); cmd.Parameters.AddWithValue("$pair", pair.ToString()); cmd.Parameters.AddWithValue("$running", (int)JobState.Running);
+                if (cmd.ExecuteNonQuery() != 1) throw new InvalidOperationException("제외 처리 중 작업 상태가 변경되었습니다.");
+            }
+        }
+    }
     public bool TryStart(long id)
     {
         using var c = Open(); using var cmd = c.CreateCommand();

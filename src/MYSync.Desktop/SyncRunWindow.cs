@@ -66,7 +66,9 @@ public sealed class SyncRunWindow : Window
             var account = accounts.List().SingleOrDefault(x => x.Id == pair.AccountId && x.ProviderId == pair.ProviderId) ?? throw new InvalidOperationException("계정을 찾을 수 없습니다.");
             status.Text = "계정 연결 및 파일 검사 중…";
             values = accounts.ReadValues(account); await configurable.ConnectAsync(values, ct);
-            local = new LocalEndpoint(pair.LocalPath, recovery); remote = transfer.OpenEndpoint(pair.RemoteFolderId);
+            var policy = new SyncPolicy(pair.Exclusions, pair.SpeedLimitKiB);
+            journal.SkipExcluded(pair.Id, policy.Exclusions);
+            local = new PolicyEndpoint(new LocalEndpoint(pair.LocalPath, recovery), policy); remote = new PolicyEndpoint(transfer.OpenEndpoint(pair.RemoteFolderId), policy);
             var left = await local.ScanAsync(ct); var right = await remote.ScanAsync(ct);
             plan = SyncPlanner.Compare(left, right, journal.ReadBaseline(pair.Id));
             if (!plan.CanExecute) throw new InvalidOperationException(string.Join(" / ", plan.Errors));
@@ -81,7 +83,7 @@ public sealed class SyncRunWindow : Window
             execute.IsEnabled = true;
         }
         catch (OperationCanceledException) { status.Text = "검사를 중단했습니다."; }
-        catch (Exception ex) { status.Text = "검사 실패: " + ex.Message; }
+        catch (Exception ex) { status.Text = "검사 실패: " + ex.Message; progress?.Report(new(SyncPhase.Attention, status.Text)); }
         finally { values?.Clear(); Finish(); }
     }
     private async Task ExecuteAsync()

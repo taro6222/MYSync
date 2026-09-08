@@ -181,8 +181,10 @@ public sealed class ResolveWindow : Window
             status.Text = "계정 연결 및 현재 상태 검사 중…";
             values = accounts.ReadValues(account);
             await configurable.ConnectAsync(values, ct);
-            local = new LocalEndpoint(pair.LocalPath, recovery);
-            remote = transfer.OpenEndpoint(pair.RemoteFolderId);
+            var policy = new SyncPolicy(pair.Exclusions, pair.SpeedLimitKiB);
+            journal.SkipExcluded(pair.Id, policy.Exclusions);
+            local = new PolicyEndpoint(new LocalEndpoint(pair.LocalPath, recovery), policy);
+            remote = new PolicyEndpoint(transfer.OpenEndpoint(pair.RemoteFolderId), policy);
             var left = await local.ScanAsync(ct);
             if (!left.IsComplete) throw new InvalidOperationException("로컬 검사 실패: " + string.Join(" / ", left.Errors));
             var right = await remote.ScanAsync(ct);

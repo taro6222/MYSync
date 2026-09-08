@@ -30,8 +30,7 @@ public sealed partial class GoogleDriveProvider : IProvider, IConfigurableProvid
     public async Task ConnectAsync(IReadOnlyDictionary<string, string> values, CancellationToken ct)
     {
         // Saved accounts retain their original OAuth client binding. New logins use the distributor configuration.
-        if (!values.ContainsKey("client_id")) values = OAuthClientConfiguration.Load(Path.Combine(
-            Path.GetDirectoryName(typeof(GoogleDriveProvider).Assembly.Location)!, "oauth-client.json"));
+        if (!values.ContainsKey("client_id")) values = OAuthClientConfiguration.LoadEmbedded();
         if (!values.TryGetValue("client_id", out var id) || string.IsNullOrWhiteSpace(id) || !id.EndsWith(".apps.googleusercontent.com", StringComparison.Ordinal)
             || id.Any(char.IsWhiteSpace) || !values.TryGetValue("client_secret", out var secret) || string.IsNullOrWhiteSpace(secret))
             throw new ArgumentException("Google 데스크톱 OAuth 클라이언트 ID와 보안 비밀번호를 입력하세요.");
@@ -41,7 +40,7 @@ public sealed partial class GoogleDriveProvider : IProvider, IConfigurableProvid
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromMinutes(3));
             candidate = await connect(values, timeout.Token);
-            client = new HttpClient(handlers()) { Timeout = TimeSpan.FromSeconds(30), MaxResponseContentBufferSize = 4 * 1024 * 1024 };
+            client = new HttpClient(new RequestTimeoutHandler(handlers())) { Timeout = Timeout.InfiniteTimeSpan, MaxResponseContentBufferSize = 4 * 1024 * 1024 };
             var root = await ReadFolder(client, candidate, "root", timeout.Token);
             var saved = new Dictionary<string, string> { ["client_id"] = id, ["client_secret"] = secret, ["oauth_token"] = candidate.ExportToken(), ["oauth_scope"] = GoogleSession.Scope };
             session?.Dispose(); http?.Dispose();

@@ -139,7 +139,7 @@ public sealed class SyncExecutor(SyncJournal journal, RetryPolicy? retryPolicy =
         var jobs = journal.ReadJobs(pair);
         if (jobs.Any(x => x.State is JobState.Pending or JobState.Running or JobState.NeedsReconcile))
         {
-            Report(new(SyncPhase.Attention, "완료되지 않은 항목이 있습니다.", Completed: completed, Total: total));
+            Report(new(SyncPhase.Attention, "완료되지 않은 항목이 있습니다. " + string.Join(" / ", issues), Completed: completed, Total: total));
             return new(false, issues, transientOnly);
         }
         try

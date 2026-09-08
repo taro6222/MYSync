@@ -8,9 +8,10 @@ namespace MYSync.Sync.Infrastructure;
 public sealed record RecoveryRecord(string Root, string RelativePath, string Action, SyncEntry Expected, string BackupPath, bool Verified);
 
 /// <summary>Local filesystem adapter with retained originals. Recovery must be on the same volume, outside sync roots.</summary>
-public sealed class LocalEndpoint : ISyncEndpoint
+public sealed class LocalEndpoint : ISyncEndpoint, ISyncPolicyEndpoint
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.OrdinalIgnoreCase);
+    public SyncPolicy Policy { get; set; } = new();
     private readonly string root;
     private readonly string recovery;
     private readonly SemaphoreSlim gate;
@@ -35,7 +36,7 @@ public sealed class LocalEndpoint : ISyncEndpoint
             CheckAncestors(root); CheckAncestors(recovery);
             var pending = ReadRecovery().Where(x => !x.Verified).ToArray();
             if (pending.Length > 0) return new([], ["확인되지 않은 파일 작업이 있습니다. 복구 기록을 확인하세요: " + recovery]);
-            return await new LocalScanner(fingerprints).ScanAsync(root, ct);
+            return await new LocalScanner(fingerprints, exclusions: Policy.Exclusions).ScanAsync(root, ct);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
         { return new([], [ex.Message]); }

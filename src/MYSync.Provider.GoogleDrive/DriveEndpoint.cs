@@ -16,8 +16,9 @@ public sealed partial class GoogleDriveProvider
             throw new ArgumentException("Google 폴더 ID가 올바르지 않습니다.");
         return new DriveEndpoint(http, session, remoteFolderId);
     }
-    private sealed class DriveEndpoint(HttpClient client, IGoogleSession account, string root) : ISyncEndpoint
+    private sealed class DriveEndpoint(HttpClient client, IGoogleSession account, string root) : ISyncEndpoint, ISyncPolicyEndpoint
     {
+        public SyncPolicy Policy { get; set; } = new();
         private const long MaxFile = 5 * 1024 * 1024;
         private const string Fields = "id,name,mimeType,parents,trashed,driveId,version,size";
         private sealed record Item(string Id, string Name, string Mime, string[] Parents, string Version, long Size, bool Trashed, bool Shared, string? Tag = null)
@@ -113,6 +114,7 @@ public sealed partial class GoogleDriveProvider
                     if (string.IsNullOrWhiteSpace(item.Name) || item.Name is "." or ".." || item.Name.IndexOfAny(['/', '\\', ':']) >= 0 || item.Name.Any(char.IsControl))
                         throw new InvalidDataException("상대 경로로 표현할 수 없는 Google 이름입니다.");
                     var path = prefix + item.Name;
+                    if (Policy.Exclusions.Matches(path, item.Folder ? EntryKind.Directory : EntryKind.File)) { notices.Add(new(path, "연결별 제외 규칙")); continue; }
                     if (group.Count() > 1) { notices.Add(new(path, "같은 이름의 Google 항목이 여러 개입니다.")); continue; }
                     if (Unsupported(item) is { } why) { notices.Add(new(path, why)); continue; }
                     if (item.Folder) { entries.Add(new(path, EntryKind.Directory, null)); await Visit(item.Id, path + "/", depth + 1); }
@@ -149,15 +151,16 @@ public sealed partial class GoogleDriveProvider
             if (expected.Folder || Unsupported(expected) is not null) throw new SyncPreconditionException("다운로드할 수 없는 Google 항목입니다.");
             var before = await Metadata(expected.Id, ct);
             if (!Same(before, expected)) throw new SyncPreconditionException("Google 파일이 검사 이후 변경되었습니다.");
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromMinutes(5));
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(Policy.Bandwidth.TimeoutFor(expected.Size));
             using var request = new HttpRequestMessage(HttpMethod.Get, "https://www.googleapis.com/drive/v3/files/" + Uri.EscapeDataString(expected.Id) + "?alt=media");
+            request.Options.Set(RequestTimeoutHandler.Streaming, true);
             using var response = await Send(request, timeout.Token, true); var stream = Temp();
             try
             {
                 var buffer = new byte[65536]; await using var input = await response.Content.ReadAsStreamAsync(timeout.Token);
                 int read;
                 while ((read = await input.ReadAsync(buffer, timeout.Token)) != 0)
-                { if (stream.Length + read > MaxFile) throw new SyncPreconditionException("Google 파일은 현재 5 MiB 이하만 전송합니다."); await stream.WriteAsync(buffer.AsMemory(0, read), timeout.Token); }
+                { if (stream.Length + read > MaxFile) throw new SyncPreconditionException("Google 파일은 현재 5 MiB 이하만 전송합니다."); await Policy.Bandwidth.WaitAsync(read, timeout.Token); await stream.WriteAsync(buffer.AsMemory(0, read), timeout.Token); }
                 stream.Position = 0; var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, timeout.Token)); stream.Position = 0;
                 if (!Same(before, await Metadata(expected.Id, timeout.Token))) throw new SyncPreconditionException("다운로드 중 Google 파일이 변경되었습니다.");
                 return (stream, hash);
@@ -204,7 +207,8 @@ public sealed partial class GoogleDriveProvider
             var media = new StreamContent(data); media.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream"); body.Add(media);
             using var request = new HttpRequestMessage(existing is null ? HttpMethod.Post : HttpMethod.Patch,
                 "https://www.googleapis.com/upload/drive/v3/files" + (existing is null ? "" : "/" + Uri.EscapeDataString(id)) + "?uploadType=multipart&fields=id");
-            request.Content = body;
+            request.Content = Policy.Bandwidth.Limit(body);
+            request.Options.Set(RequestTimeoutHandler.Budget, Policy.Bandwidth.TimeoutFor(data.Length + 4096));
             if (existing is not null) request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(existing.Tag!));
             using var response = await Send(request, ct);
             var (_, published) = await Resolve(path, ct);

@@ -1,5 +1,10 @@
 # 수동 테스트 안내
 
+## 오류 알림·개별 정책·OAuth 배포 업데이트 (2026-09-08)
+
+트레이 오류 알림 클릭 시 해당 오류 페이지로 이동한다. 연결별 파일·폴더 제외와 합산 전송 속도(KiB/s, 0=무제한)를 설정할 수 있다. Google 설정은 DLL 내부 리소스로 전환해 배포 폴더에 oauth-client.json을 복사하지 않는다. 내장 리소스는 추출 가능하므로 비밀 보장으로 간주하지 않는다. [설정 및 테스트](sync-options-and-alerts.md), [OAuth 배포와 보안 한계](oauth-distribution.md)를 참고한다. 아래 구버전 설명과 다르면 이 업데이트를 우선한다.
+
+
 ## 실행
 
 `MYSync.Desktop.exe`를 실행하세요. Windows x64용 단일 EXE에 .NET 런타임이 포함됩니다. 다른 위치로 옮길 때는 외부 Provider가 있는 plugins 폴더도 함께 복사하세요.

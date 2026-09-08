@@ -4,12 +4,22 @@ namespace MYSync.Provider.GoogleDrive;
 
 public static class OAuthClientConfiguration
 {
+    public static IReadOnlyDictionary<string, string> LoadEmbedded()
+    {
+        using var stream = typeof(OAuthClientConfiguration).Assembly.GetManifestResourceStream("MYSync.GoogleOAuth");
+        if (stream is null) throw new InvalidOperationException("배포용 Google 로그인 설정이 없습니다.");
+        return Parse(new StreamReader(stream).ReadToEnd());
+    }
     public static IReadOnlyDictionary<string, string> Load(string path)
     {
         if (!File.Exists(path)) throw new InvalidOperationException("이 빌드는 Google 로그인이 아직 준비되지 않았습니다. 앱 배포자가 Google 연결 설정을 완료해야 합니다.");
+        return Parse(File.ReadAllText(path));
+    }
+    private static IReadOnlyDictionary<string, string> Parse(string json)
+    {
         try
         {
-            using var doc = JsonDocument.Parse(File.ReadAllText(path));
+            using var doc = JsonDocument.Parse(json);
             var installed = doc.RootElement.GetProperty("installed");
             var id = installed.GetProperty("client_id").GetString();
             var secret = installed.GetProperty("client_secret").GetString();
