@@ -33,6 +33,9 @@ public static class SyncPlanner
         foreach (var path in l.Keys.Concat(r.Keys).Concat(b.Keys).Distinct(StringComparer.OrdinalIgnoreCase))
             if (!Representable(path)) unsupported.TryAdd(path, new(path, "이 컴퓨터에서 사용할 수 없는 이름입니다."));
         var blocked = unsupported.Keys.ToArray();
+        // Report the unsupported subtree once, regardless of provider enumeration order.
+        foreach (var path in blocked)
+            if (blocked.Any(parent => IsChild(path, parent))) unsupported.Remove(path);
         // A whole subtree is excluded: an unhandled folder was never scanned, so its children must not look deleted.
         bool Excluded(string path) => blocked.Any(x => path.Equals(x, StringComparison.OrdinalIgnoreCase) || IsChild(path, x));
         var result = new List<PlannedOperation>();

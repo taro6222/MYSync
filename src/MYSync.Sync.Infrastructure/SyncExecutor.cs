@@ -81,6 +81,7 @@ public sealed class SyncExecutor(SyncJournal journal, RetryPolicy? retryPolicy =
                 catch (Exception ex) when (attempt < retry.MaxAttempts && !ct.IsCancellationRequested && Handled(ex) && Classify(ex) == SyncFailureKind.Transient)
                 {
                     var delay = retry.DelayFor(attempt);
+                    SyncDiagnostics.Write("job.retry", failure: Classify(ex), exceptionType: ex.GetType().Name);
                     progress?.Report(new(SyncPhase.Attention,
                         $"일시 오류로 {delay.TotalSeconds:0.#}초 후 재시도합니다 ({attempt}/{retry.MaxAttempts}): {ex.Message}",
                         job.Operation.Path, job.Operation.Action, completed, total));
@@ -93,26 +94,31 @@ public sealed class SyncExecutor(SyncJournal journal, RetryPolicy? retryPolicy =
         {
             ct.ThrowIfCancellationRequested();
             if (!journal.TryAcquire(job.Id)) continue;
+            using var diagnosticScope = SyncDiagnostics.BeginJob(pair, job.Id);
+            SyncDiagnostics.Write("job.started");
             var op = job.Operation;
             try
             {
                 if (await Attempt(job))
                 {
-                    journal.SetOutcome(job.Id, JobState.NeedsReconcile); completed++; permanent++;
+                    journal.SetOutcome(job.Id, JobState.NeedsReconcile, "충돌 원본과 보존 사본을 확인해야 합니다.", SyncFailureKind.Precondition); completed++; permanent++;
+                    SyncDiagnostics.Write("job.conflict", failure: SyncFailureKind.Precondition);
                     issues.Add(op.Path + ": 충돌 원본과 보존 사본을 확인해야 합니다.");
                 }
-                else { journal.SetOutcome(job.Id, JobState.Applied); completed++; }
+                else { journal.SetOutcome(job.Id, JobState.Applied); completed++; SyncDiagnostics.Write("job.applied"); }
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
-                journal.SetOutcome(job.Id, JobState.NeedsReconcile);
+                journal.SetOutcome(job.Id, JobState.NeedsReconcile, "사용자가 실행을 중단했습니다. 결과를 재검사해야 합니다.");
+                SyncDiagnostics.Write("job.cancelled");
                 progress?.Report(new(SyncPhase.Idle, "중단했습니다.", op.Path, op.Action, completed, total));
                 throw;
             }
             catch (Exception ex) when (Handled(ex))
             {
                 var kind = Classify(ex);
-                journal.SetOutcome(job.Id, JobState.NeedsReconcile); completed++;
+                journal.SetOutcome(job.Id, JobState.NeedsReconcile, ex.Message, kind); completed++;
+                SyncDiagnostics.Write("job.failed", failure: kind, exceptionType: ex.GetType().Name);
                 if (kind != SyncFailureKind.Transient) permanent++;
                 issues.Add($"{op.Path}: [{Label(kind)}] {ex.Message}");
             }

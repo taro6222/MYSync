@@ -19,6 +19,7 @@ public sealed class WebDavException : SyncTransferException
         HttpStatusCode.Forbidden => SyncFailureKind.Permission,
         HttpStatusCode.NotFound or HttpStatusCode.Gone => SyncFailureKind.Missing,
         HttpStatusCode.PreconditionFailed or HttpStatusCode.Conflict or HttpStatusCode.MethodNotAllowed => SyncFailureKind.Precondition,
+        HttpStatusCode.InsufficientStorage => SyncFailureKind.Unknown,
         HttpStatusCode.RequestTimeout or HttpStatusCode.TooManyRequests or HttpStatusCode.Locked or HttpStatusCode.ServiceUnavailable => SyncFailureKind.Transient,
         not null when (int)status.Value is >= 500 and < 600 => SyncFailureKind.Transient,
         _ => SyncFailureKind.Unknown
@@ -53,7 +54,7 @@ public sealed partial class WebDavProvider : IProvider, IConfigurableProvider, I
             builder.Port = port;
         }
         var candidateRoot = new Uri(builder.Uri.AbsoluteUri.TrimEnd('/') + "/");
-        var candidate = new HttpClient(handlerFactory()) { Timeout = TimeSpan.FromSeconds(30), MaxResponseContentBufferSize = 4 * 1024 * 1024 };
+        var candidate = new HttpClient(new DiagnosticHandler(handlerFactory())) { Timeout = TimeSpan.FromSeconds(30), MaxResponseContentBufferSize = 4 * 1024 * 1024 };
         candidate.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(Encoding.UTF8.GetBytes(username + ":" + password)));
         try
         {
@@ -142,4 +143,3 @@ public sealed partial class WebDavProvider : IProvider, IConfigurableProvider, I
     }
     public void Dispose() { client?.Dispose(); client = null; root = null; }
 }
-

@@ -114,7 +114,8 @@ public sealed class ResolveWindow : Window
         var rows = journal.ReadJobs(pair.Id).Where(x => x.State != JobState.Completed).Select(x => new JobRow(
             x.Id,
             x.State switch { JobState.NeedsReconcile => "확인 필요", JobState.Pending => "대기", JobState.Running => "실행 중", _ => "적용됨" },
-            x.Operation.Action.ToString(), x.Operation.Path, x.Operation.Reason,
+            x.Operation.Action.ToString(), x.Operation.Path,
+            x.FailureReason is null ? x.Operation.Reason : $"[{x.FailureKind?.ToString() ?? "중단"}] {x.FailureReason} ({x.FailedAt})",
             x.Operation.Action == SyncAction.Conflict ? Copies(x) : "",
             x.State == JobState.NeedsReconcile && x.Operation.Action == SyncAction.Conflict
                 && x.Operation.ExpectedLocal?.Kind != EntryKind.Directory && x.Operation.ExpectedRemote?.Kind != EntryKind.Directory)).ToArray();

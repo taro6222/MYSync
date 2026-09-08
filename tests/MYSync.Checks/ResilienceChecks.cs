@@ -94,7 +94,11 @@ internal static class ResilienceChecks
             var journal = new SyncJournal(Path.Combine(area, "journal.db"));
             var pair = Guid.NewGuid();
             journal.Enqueue(pair, SyncPlanner.Compare(await left.ScanAsync(default), await right.ScanAsync(default), []));
-            return (await new SyncExecutor(journal, retry).RunAsync(pair, left, right), right.Writes);
+            var report = await new SyncExecutor(journal, retry).RunAsync(pair, left, right);
+            var stored = new SyncJournal(Path.Combine(area, "journal.db")).ReadJobs(pair).Single();
+            Check(report.Converged ? stored.FailureReason is null : stored.FailureReason is not null && stored.FailureKind is not null && stored.FailedAt is not null,
+                "executor did not persist the failure outcome correctly");
+            return (report, right.Writes);
         }
 
         var recovered = await Transfer("transient", n => n <= 2 ? new SyncTransferException("서버가 일시적으로 응답하지 않습니다.", SyncFailureKind.Transient) : null, fast);

@@ -3,7 +3,8 @@ using System.Text.Json;
 using MYSync.Sync.Core;
 namespace MYSync.Sync.Infrastructure;
 public enum JobState { Pending, Running, NeedsReconcile, Completed, Applied }
-public sealed record JournalJob(long Id, Guid PairId, PlannedOperation Operation, JobState State);
+public sealed record JournalJob(long Id, Guid PairId, PlannedOperation Operation, JobState State,
+    string? FailureReason = null, SyncFailureKind? FailureKind = null, string? FailedAt = null);
 public sealed record ConflictResolution(long JobId, PlannedOperation Operation);
 public sealed class SyncJournal
 {
@@ -15,6 +16,18 @@ public sealed class SyncJournal
         using var c = Open(); using var cmd = c.CreateCommand();
         cmd.CommandText = "CREATE TABLE IF NOT EXISTS Baselines(PairId TEXT PRIMARY KEY, Payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS Jobs(Id INTEGER PRIMARY KEY AUTOINCREMENT, PairId TEXT NOT NULL, Payload TEXT NOT NULL, State INTEGER NOT NULL);";
         cmd.ExecuteNonQuery();
+        foreach (var column in new[] { "FailureReason", "FailureKind", "FailedAt" })
+        {
+            using var check = c.CreateCommand();
+            check.CommandText = "SELECT COUNT(*) FROM pragma_table_info('Jobs') WHERE name=$name";
+            check.Parameters.AddWithValue("$name", column);
+            if ((long)check.ExecuteScalar()! == 0)
+            {
+                using var alter = c.CreateCommand();
+                alter.CommandText = $"ALTER TABLE Jobs ADD COLUMN {column} TEXT NULL";
+                alter.ExecuteNonQuery();
+            }
+        }
     }
     private SqliteConnection Open() { var c = new SqliteConnection(connectionString); c.Open(); return c; }
     public IReadOnlyList<SyncEntry> ReadBaseline(Guid pair)
@@ -45,9 +58,12 @@ public sealed class SyncJournal
     public IReadOnlyList<JournalJob> ReadJobs(Guid pair)
     {
         using var c = Open(); using var cmd = c.CreateCommand();
-        cmd.CommandText = "SELECT Id,Payload,State FROM Jobs WHERE PairId=$pair ORDER BY Id"; cmd.Parameters.AddWithValue("$pair", pair.ToString());
+        cmd.CommandText = "SELECT Id,Payload,State,FailureReason,FailureKind,FailedAt FROM Jobs WHERE PairId=$pair ORDER BY Id"; cmd.Parameters.AddWithValue("$pair", pair.ToString());
         using var reader = cmd.ExecuteReader(); var jobs = new List<JournalJob>();
-        while (reader.Read()) jobs.Add(new(reader.GetInt64(0), pair, JsonSerializer.Deserialize<PlannedOperation>(reader.GetString(1))!, (JobState)reader.GetInt32(2)));
+        while (reader.Read()) jobs.Add(new(reader.GetInt64(0), pair, JsonSerializer.Deserialize<PlannedOperation>(reader.GetString(1))!, (JobState)reader.GetInt32(2),
+            reader.IsDBNull(3) ? null : reader.GetString(3),
+            !reader.IsDBNull(4) && Enum.TryParse<SyncFailureKind>(reader.GetString(4), out var kind) ? kind : null,
+            reader.IsDBNull(5) ? null : reader.GetString(5)));
         return jobs;
     }
     public bool TryStart(long id)
@@ -65,11 +81,14 @@ public sealed class SyncJournal
         cmd.Parameters.AddWithValue("$reconcile", (int)JobState.NeedsReconcile); cmd.Parameters.AddWithValue("$id", id);
         return cmd.ExecuteNonQuery() == 1;
     }
-    public void SetOutcome(long id, JobState state)
+    public void SetOutcome(long id, JobState state, string? failureReason = null, SyncFailureKind? failureKind = null)
     {
         if (state is not (JobState.Applied or JobState.NeedsReconcile)) throw new ArgumentOutOfRangeException(nameof(state));
         using var c = Open(); using var cmd = c.CreateCommand();
-        cmd.CommandText = "UPDATE Jobs SET State=$state WHERE Id=$id AND State=$running";
+        cmd.CommandText = "UPDATE Jobs SET State=$state, FailureReason=$reason, FailureKind=$kind, FailedAt=$at WHERE Id=$id AND State=$running";
+        cmd.Parameters.AddWithValue("$reason", (object?)failureReason ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$kind", (object?)failureKind?.ToString() ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$at", failureReason is null ? DBNull.Value : DateTimeOffset.UtcNow.ToString("O"));
         cmd.Parameters.AddWithValue("$state", (int)state); cmd.Parameters.AddWithValue("$running", (int)JobState.Running); cmd.Parameters.AddWithValue("$id", id);
         if (cmd.ExecuteNonQuery() != 1) throw new InvalidOperationException("실행 중인 작업만 결과를 기록할 수 있습니다.");
     }

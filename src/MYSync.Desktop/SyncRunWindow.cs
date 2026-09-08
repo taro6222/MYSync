@@ -71,7 +71,8 @@ public sealed class SyncRunWindow : Window
             plan = SyncPlanner.Compare(left, right, journal.ReadBaseline(pair.Id));
             if (!plan.CanExecute) throw new InvalidOperationException(string.Join(" / ", plan.Errors));
             var existing = journal.ReadJobs(pair.Id).Where(x => x.State != JobState.Completed).ToArray(); resume = existing.Length > 0;
-            grid.ItemsSource = resume ? existing.Select(x => x.Operation).ToArray() : plan.Operations;
+            grid.ItemsSource = resume ? existing.Select(x => x.FailureReason is null ? x.Operation :
+                x.Operation with { Reason = $"[{x.FailureKind?.ToString() ?? "중단"}] {x.FailureReason} ({x.FailedAt})" }).ToArray() : plan.Operations;
             execute.Content = resume ? "미완료 작업 재검사·재개" : "표시된 작업 실행";
             var skipped = plan.Unsupported.Count == 0 ? "" :
                 $"\n미지원 항목 {plan.Unsupported.Count}개(동기화하지 않고 양쪽 모두 그대로 둡니다): " +
