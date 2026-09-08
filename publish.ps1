@@ -15,6 +15,7 @@ foreach ($provider in @('Sample','WebDav','GoogleDrive')) {
 Get-ChildItem $output -Recurse -File -Include *.pdb,*.runtimeconfig.json | Remove-Item -Force
 Get-ChildItem $output -Recurse -File -Filter 'MYSync.Provider.Abstractions.dll' | Remove-Item -Force
 Get-ChildItem $output -Recurse -File -Filter 'MYSync.Sync.Core.dll' | Remove-Item -Force
+Copy-Item docs/pair-settings-and-startup.md "$output/pair-settings-and-startup.md" -Force
 Copy-Item docs/manual-test.md "$output/TEST-GUIDE.md" -Force
 Copy-Item docs/transfer-performance.md "$output/transfer-performance.md" -Force
 Copy-Item docs/file-error-actions.md "$output/file-error-actions.md" -Force

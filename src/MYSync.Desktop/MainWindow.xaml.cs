@@ -24,6 +24,8 @@ public partial class MainWindow : Window
     private Guid? activeAccountId;
     private readonly Dictionary<Guid, TransferControl> transferControls = [];
     private TransferControl ControlFor(Guid id) { if (!transferControls.TryGetValue(id, out var value)) transferControls[id] = value = new(); return value; }
+    private Window? pairEditor;
+    private SyncPair? editingPair;
     private string draftExclusions = "";
     private long draftSpeed;
     private readonly Queue<SyncAlert> notificationQueue = new();
@@ -150,7 +152,45 @@ public partial class MainWindow : Window
     }
     private void ShowSync(object sender, RoutedEventArgs e) => MainTabs.SelectedIndex = 0;
     private void ShowTransfers(object sender, RoutedEventArgs e) => MainTabs.SelectedIndex = 2;
-    private void ShowAdd(object sender, RoutedEventArgs e) => MainTabs.SelectedIndex = 1;
+    private void ShowAdd(object sender, RoutedEventArgs e) => ShowPairEditor();
+    private void ShowPairEditor(SyncPair? pair = null)
+    {
+        if (pairEditor is not null) { pairEditor.Activate(); return; }
+        editingPair = pair;
+        draftExclusions = pair?.Exclusions ?? ""; draftSpeed = pair?.SpeedLimitKiB ?? 0;
+        ProvidersBox.SelectedItem = pair is null ? null : model.Providers.FirstOrDefault(x => x.Id == pair.ProviderId);
+        if (pair is not null)
+        {
+            RefreshAccounts(pair.ProviderId);
+            AccountsBox.SelectedItem = AccountsBox.Items.Cast<SavedAccount>().FirstOrDefault(x => x.Id == pair.AccountId);
+        }
+        activeAccountId = null; RemoteBox.ItemsSource = null;
+        LocalPathBox.Text = pair?.LocalPath ?? "";
+        EditorHeading.Text = pair is null ? "두 폴더를 하나로 연결" : "동기화 폴더 변경";
+        SavePairButton.Content = pair is null ? "동기화 연결 저장" : "변경사항 저장";
+        StatusText.Text = pair is null ? "계정과 두 폴더를 선택하세요." : "저장 계정을 연결한 후 원격 폴더를 선택하세요. 폴더 변경 시 새 비교를 시작하며 기존 파일은 유지됩니다.";
+        var editor = (FrameworkElement)PairEditorHost.Content;
+        PairEditorHost.Content = null;
+        var panel = new DockPanel { Margin = new Thickness(24) };
+        var status = new TextBlock { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0,12,0,0) };
+        status.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding(nameof(TextBlock.Text)) { Source = StatusText });
+        DockPanel.SetDock(status, Dock.Bottom); panel.Children.Add(status); panel.Children.Add(editor);
+        editor.SetBinding(IsEnabledProperty, new System.Windows.Data.Binding(nameof(IsEnabled)) { Source = MainTabs });
+        var dialog = new Window { Title = pair is null ? "동기화 추가" : "동기화 폴더 변경", Owner = this,
+            Width = 960, Height = 790, MinWidth = 800, MinHeight = 600, WindowStartupLocation = WindowStartupLocation.CenterOwner,
+            Background = Background, Content = panel, DataContext = model };
+        foreach (var key in Resources.Keys) dialog.Resources[key] = Resources[key];
+        dialog.Closing += (_, args) => { if (!MainTabs.IsEnabled) { args.Cancel = true; StatusText.Text = "진행 중인 작업이 끝나면 닫을 수 있습니다."; } };
+        pairEditor = dialog;
+        try { dialog.ShowDialog(); }
+        finally
+        {
+            panel.Children.Remove(editor);
+            System.Windows.Data.BindingOperations.ClearBinding(editor, IsEnabledProperty);
+            PairEditorHost.Content = editor; pairEditor = null; editingPair = null;
+            activeAccountId = null; RemoteBox.ItemsSource = null; UpdatePreview();
+        }
+    }
     private void OpenSync(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new SyncRunWindow(pair, provider, accountStore, recovery, journalPath, ProgressFor(pair, true), ControlFor(pair.Id), (path, kind) => SaveFileExclusion(pair.Id, path, kind)));
     private void OpenResolve(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new ResolveWindow(pair, provider, accountStore, recovery, journalPath, ControlFor(pair.Id), ProgressFor(pair)));
     private void OpenPairWindow(object sender, Func<SyncPair, IProvider, string, string, Window> create)
@@ -205,7 +245,7 @@ public partial class MainWindow : Window
     private void RenameAccount(object sender, RoutedEventArgs e)
     {
         if (SelectedAccount(out _) is not { } account) return;
-        var dialog = new TextPromptWindow("계정 이름 변경", "표시할 이름", account.DisplayName) { Owner = this };
+        var dialog = new TextPromptWindow("계정 이름 변경", "표시할 이름", account.DisplayName) { Owner = pairEditor ?? this };
         if (dialog.ShowDialog() != true) return;
         try
         {
@@ -265,7 +305,7 @@ public partial class MainWindow : Window
     private void ChooseLocal(object sender, RoutedEventArgs e)
     {
         var dialog = new OpenFolderDialog();
-        if (dialog.ShowDialog() == true) LocalPathBox.Text = dialog.FolderName;
+        if (dialog.ShowDialog(pairEditor ?? this) == true) LocalPathBox.Text = dialog.FolderName;
     }
     private void SetPaused(Guid id, bool paused)
     {
@@ -384,7 +424,7 @@ public partial class MainWindow : Window
     private IReadOnlyDictionary<string, string>? CollectConnectionValues(IConfigurableProvider configurable, IProvider provider)
     {
         if (provider is IBrowserLoginProvider) return new Dictionary<string, string>();
-        var dialog = new ProviderConnectionWindow(configurable.ConnectionFields, (provider as IPersistableConnectionProvider)?.ConnectionInstructions) { Owner = this };
+        var dialog = new ProviderConnectionWindow(configurable.ConnectionFields, (provider as IPersistableConnectionProvider)?.ConnectionInstructions) { Owner = pairEditor ?? this };
         return dialog.ShowDialog() == true ? dialog.Values : null;
     }
     private async void ConnectProvider(object sender, RoutedEventArgs e)
@@ -437,6 +477,21 @@ public partial class MainWindow : Window
             activeAccountId = account.Id;
             SetFolders(folders);
             StatusText.Text = "저장 계정으로 연결했습니다.";
+            if (editingPair is { } original && original.AccountId == account.Id && original.ProviderId == provider.Id)
+            {
+                try
+                {
+                    var current = await provider.GetFoldersAsync(original.RemoteFolderId, CancellationToken.None);
+                    SetFolders(current);
+                    RemoteBox.SelectedItem = current.FirstOrDefault(x => x.Id == original.RemoteFolderId);
+                    UpdatePreview();
+                }
+                catch (Exception ex)
+                {
+                    RemoteBox.SelectedIndex = -1;
+                    StatusText.Text = "기존 원격 폴더를 열 수 없습니다. 루트에서 새 폴더를 선택하세요. " + ex.Message;
+                }
+            }
             if (provider is IPersistableConnectionProvider persisted) accountStore.Save(account, persisted.ExportConnectionValues());
         }
         catch (System.Security.Cryptography.CryptographicException) { StatusText.Text = "이 Windows 사용자로 계정 정보를 복호화할 수 없습니다. 새 계정을 연결하세요."; }
@@ -459,7 +514,7 @@ public partial class MainWindow : Window
     private async void BrowseRemote(object sender, RoutedEventArgs e)
     { if (RemoteBox.SelectedItem is RemoteFolder folder) await Browse(folder.Id); }
     private async void BrowseRoot(object sender, RoutedEventArgs e) => await Browse(null);
-    private void SavePair(object sender, RoutedEventArgs e)
+    private async void SavePair(object sender, RoutedEventArgs e)
     {
         if (ProvidersBox.SelectedItem is not IProvider p || RemoteBox.SelectedItem is not RemoteFolder folder || !Directory.Exists(LocalPathBox.Text))
         { StatusText.Text = "Provider와 로컬·원격 폴더를 선택하세요."; return; }
@@ -470,11 +525,44 @@ public partial class MainWindow : Window
         { StatusText.Text = "드라이브 전체 또는 복구 보관함 대신 일반 하위 폴더를 선택하세요."; return; }
         try
         {
-            var pair = new SyncPair(Guid.NewGuid(), p.Id, path, folder.Id, folder.Name, true, activeAccountId, draftExclusions, draftSpeed);
-            store.Save(pair); model.Pairs.Add(pair); MainTabs.SelectedIndex = 0;
-            StatusText.Text = "저장했습니다. 검사·실행 또는 자동 시작을 선택하세요.";
+            MainTabs.IsEnabled = false;
+            var old = editingPair;
+            if (old is not null) await StopAuto(old.Id, true);
+            using var pairLock = old is null ? null : new Mutex(false, "Local\\MYSync-pair-" + old.Id.ToString("N"));
+            var acquired = false;
+            try
+            {
+                if (pairLock is not null)
+                {
+                    try { acquired = pairLock.WaitOne(0); } catch (AbandonedMutexException) { acquired = true; }
+                    if (!acquired) throw new InvalidOperationException("다른 앱에서 이 동기화 연결을 사용 중입니다.");
+                }
+                var rootsChanged = old is not null && (old.ProviderId != p.Id || old.AccountId != activeAccountId ||
+                    !string.Equals(old.LocalPath, path, StringComparison.OrdinalIgnoreCase) || old.RemoteFolderId != folder.Id);
+                if (rootsChanged && Directory.Exists(RecoveryPathFor(old!)) &&
+                    Directory.EnumerateFiles(RecoveryPathFor(old!), "*.json").Any(file =>
+                        !(System.Text.Json.JsonSerializer.Deserialize<RecoveryRecord>(File.ReadAllText(file)) ??
+                          throw new InvalidDataException("복구 기록을 읽을 수 없습니다.")).Verified))
+                    throw new InvalidOperationException("미확인 복구 기록이 있습니다. 설정의 충돌·복구에서 먼저 확인하세요.");
+                var pair = new SyncPair(old is not null && !rootsChanged ? old.Id : Guid.NewGuid(), p.Id, path, folder.Id, folder.Name, true, activeAccountId, draftExclusions, draftSpeed);
+                if (old is null) { store.Save(pair); model.Pairs.Add(pair); }
+                else
+                {
+                    store.Replace(old.Id, pair);
+                    var index = model.Pairs.ToList().FindIndex(x => x.Id == old.Id);
+                    if (index >= 0) model.Pairs[index] = pair;
+                    model.History.Stop(old.Id);
+                    if (rootsChanged) transferControls.Remove(old.Id);
+                }
+            }
+            finally { if (acquired) pairLock!.ReleaseMutex(); }
+            MainTabs.SelectedIndex = 0;
+            StatusText.Text = "저장했습니다. 설정에서 검사·실행하거나 목록에서 자동 시작을 누르세요.";
+            MainTabs.IsEnabled = true;
+            pairEditor?.Close();
         }
         catch (Exception ex) { StatusText.Text = "저장 실패: " + ex.Message; }
+        finally { MainTabs.IsEnabled = true; }
     }
     private void SetFolders(IReadOnlyList<RemoteFolder> folders)
     {
@@ -504,7 +592,7 @@ public partial class MainWindow : Window
     private async void DeletePair(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not SyncPair pair) return;
-        if (MessageBox.Show(this, pair.LocalPath + "\\n⇄ " + pair.RemoteFolderName + "\\n\\n이 동기화 연결을 삭제할까요? 실행 중인 감시를 중지합니다.\\n컴퓨터·클라우드 파일, 계정 및 복구 기록은 유지됩니다.",
+        if (MessageBox.Show(this, pair.LocalPath + "\n⇄ " + pair.RemoteFolderName + "\n\n이 동기화 연결을 삭제할까요? 실행 중인 감시를 중지합니다.\n컴퓨터·클라우드 파일, 계정 및 복구 기록은 유지됩니다.",
             "동기화 연결 삭제", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
         MainTabs.IsEnabled = false;
         try
@@ -521,7 +609,7 @@ public partial class MainWindow : Window
     }
     private void EditDraftOptions(object sender, RoutedEventArgs e)
     {
-        var dialog = new PairOptionsWindow(draftExclusions, draftSpeed) { Owner = this };
+        var dialog = new PairOptionsWindow(draftExclusions, draftSpeed) { Owner = pairEditor ?? this };
         if (dialog.ShowDialog() != true) return;
         draftExclusions = dialog.Exclusions; draftSpeed = dialog.SpeedLimitKiB;
         StatusText.Text = "새 연결의 제외·속도 설정을 적용했습니다.";
@@ -529,8 +617,22 @@ public partial class MainWindow : Window
     private async void EditPairOptions(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not SyncPair pair) return;
-        var dialog = new PairOptionsWindow(pair.Exclusions, pair.SpeedLimitKiB) { Owner = this };
+        var dialog = new PairOptionsWindow(pair.Exclusions, pair.SpeedLimitKiB, pair) { Owner = this };
         if (dialog.ShowDialog() != true) return;
+        if (dialog.Action == PairSettingsAction.Folders) { ShowPairEditor(pair); return; }
+        if (dialog.Action == PairSettingsAction.Delete) { DeletePair(sender, e); return; }
+        if (dialog.Action is PairSettingsAction.Inspect or PairSettingsAction.Resolve)
+        {
+            MainTabs.IsEnabled = false;
+            try
+            {
+                await StopAuto(pair.Id, true);
+                if (dialog.Action == PairSettingsAction.Inspect) OpenSync(sender, e); else OpenResolve(sender, e);
+            }
+            catch (Exception ex) { StatusText.Text = ex.Message; }
+            finally { MainTabs.IsEnabled = true; }
+            return;
+        }
         MainTabs.IsEnabled = false;
         try
         {
@@ -580,9 +682,7 @@ public partial class MainWindow : Window
         if (AlertsBox.SelectedItem is not SyncAlert alert) return;
         var pair = model.Pairs.FirstOrDefault(x => x.Id == alert.PairId);
         if (pair is null) { StatusText.Text = "삭제된 연결의 과거 오류입니다."; return; }
-        MainTabs.SelectedIndex = 1;
-        ProvidersBox.SelectedItem = model.Providers.FirstOrDefault(x => x.Id == pair.ProviderId);
-        AccountsBox.SelectedItem = AccountsBox.Items.Cast<SavedAccount>().FirstOrDefault(x => x.Id == pair.AccountId);
+        ShowPairEditor(pair);
     }
     private void SaveLogSettings(object sender, RoutedEventArgs e)
     {

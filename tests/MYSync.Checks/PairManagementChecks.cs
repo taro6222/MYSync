@@ -20,6 +20,16 @@ internal static class PairManagementChecks
         store.Delete(duplicate.Id);
         Check(store.Load().Select(x => x.Id).ToHashSet().SetEquals([pair.Id, nested.Id]), "Delete affected another connection");
         Check(await File.ReadAllTextAsync(file) == "keep", "Deleting a connection altered local data");
+        var changed = pair with { Id = Guid.NewGuid(), LocalPath = Path.Combine(local, "new-root"), RemoteFolderId = "new-remote", Exclusions = "*.bak", SpeedLimitKiB = 128 };
+        store.Replace(pair.Id, changed);
+        Check(store.Load().Count == 2 && store.Load().Contains(changed) && !store.Load().Any(x => x.Id == pair.Id), "Folder edit did not replace identity and settings");
+        var missingRejected = false;
+        try { store.Replace(pair.Id, changed with { Id = Guid.NewGuid() }); } catch (InvalidOperationException) { missingRejected = true; }
+        Check(missingRejected && store.Load().Contains(changed), "Missing edit target was silently added");
+        var collisionRejected = false;
+        try { store.Replace(changed.Id, changed with { Id = nested.Id }); } catch (Microsoft.Data.Sqlite.SqliteException) { collisionRejected = true; }
+        Check(collisionRejected && store.Load().Contains(changed) && store.Load().Contains(nested), "Failed replacement was not atomic");
+        Check(await File.ReadAllTextAsync(file) == "keep", "Folder editing moved or deleted local data");
         var recovery = Path.Combine(local, ".MYSync-recovery", "old-pair");
         Directory.CreateDirectory(recovery);
         await File.WriteAllTextAsync(Path.Combine(recovery, "backup.txt"), "retained");

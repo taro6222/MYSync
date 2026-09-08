@@ -32,13 +32,21 @@ public sealed class SettingsStore
         }
     }
     private SqliteConnection Open() { var c = new SqliteConnection(connectionString); c.Open(); return c; }
-    public void Save(SyncPair pair)
+    public void Save(SyncPair pair) => Save(pair, null);
+    // One atomic statement replaces the identity so old journals cannot target new roots.
+    public void Replace(Guid previousId, SyncPair pair) => Save(pair, previousId);
+    private void Save(SyncPair pair, Guid? previousId)
     {
         _ = new SyncExclusions(pair.Exclusions);
         if (pair.SpeedLimitKiB < 0 || pair.SpeedLimitKiB > 1000000) throw new ArgumentOutOfRangeException(nameof(pair));
         using var connection = Open();
         using var command = connection.CreateCommand();
         command.CommandText = "INSERT INTO SyncPairs(Id,ProviderId,LocalPath,RemoteFolderId,RemoteFolderName,Paused,AccountId,Exclusions,SpeedLimitKiB) VALUES ($id,$provider,$local,$remote,$name,$paused,$account,$exclude,$speed) ON CONFLICT(Id) DO UPDATE SET ProviderId=$provider,LocalPath=$local,RemoteFolderId=$remote,RemoteFolderName=$name,Paused=$paused,AccountId=$account,Exclusions=$exclude,SpeedLimitKiB=$speed";
+        if (previousId is not null)
+        {
+            command.CommandText = "UPDATE SyncPairs SET Id=$id,ProviderId=$provider,LocalPath=$local,RemoteFolderId=$remote,RemoteFolderName=$name,Paused=$paused,AccountId=$account,Exclusions=$exclude,SpeedLimitKiB=$speed WHERE Id=$previous";
+            command.Parameters.AddWithValue("$previous", previousId.Value.ToString());
+        }
         command.Parameters.AddWithValue("$exclude", pair.Exclusions);
         command.Parameters.AddWithValue("$speed", pair.SpeedLimitKiB);
         command.Parameters.AddWithValue("$id", pair.Id.ToString());
@@ -48,7 +56,7 @@ public sealed class SettingsStore
         command.Parameters.AddWithValue("$name", pair.RemoteFolderName);
         command.Parameters.AddWithValue("$paused", pair.Paused);
         command.Parameters.AddWithValue("$account", (object?)pair.AccountId?.ToString() ?? DBNull.Value);
-        command.ExecuteNonQuery();
+        if (command.ExecuteNonQuery() != 1) throw new InvalidOperationException("변경할 동기화 연결을 찾을 수 없습니다.");
     }
     public void Delete(Guid id)
     {
