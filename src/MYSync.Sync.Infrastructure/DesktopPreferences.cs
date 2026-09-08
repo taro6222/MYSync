@@ -2,7 +2,7 @@ using System.Text.Json;
 
 namespace MYSync.Sync.Infrastructure;
 
-public sealed record DesktopPreferences(bool CloseToTray = true);
+public sealed record DesktopPreferences(bool CloseToTray = true, int LogLimitMiB = 10);
 public sealed class DesktopPreferencesStore(string path)
 {
     public DesktopPreferences Load() => File.Exists(path)
@@ -10,6 +10,7 @@ public sealed class DesktopPreferencesStore(string path)
         : new();
     public void Save(DesktopPreferences value)
     {
+        if (value.LogLimitMiB is < 1 or > 1024) throw new ArgumentOutOfRangeException(nameof(value));
         var full = Path.GetFullPath(path); Directory.CreateDirectory(Path.GetDirectoryName(full)!);
         var temporary = full + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try

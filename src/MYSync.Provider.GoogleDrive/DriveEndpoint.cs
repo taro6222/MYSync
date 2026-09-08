@@ -19,7 +19,7 @@ public sealed partial class GoogleDriveProvider
     private sealed class DriveEndpoint(HttpClient client, IGoogleSession account, string root) : ISyncEndpoint, ISyncPolicyEndpoint
     {
         public SyncPolicy Policy { get; set; } = new();
-        private const long MaxFile = 5 * 1024 * 1024;
+        private const long MultipartThreshold = 5 * 1024 * 1024;
         private const string Fields = "id,name,mimeType,parents,trashed,driveId,version,size";
         private sealed record Item(string Id, string Name, string Mime, string[] Parents, string Version, long Size, bool Trashed, bool Shared, string? Tag = null)
         { public bool Folder => Mime == FolderType; }
@@ -43,14 +43,14 @@ public sealed partial class GoogleDriveProvider
         {
             if (item.Shared) return "공유 드라이브는 아직 지원하지 않습니다.";
             if (!item.Folder && item.Mime.StartsWith("application/vnd.google-apps.", StringComparison.Ordinal)) return "Google 문서·바로가기는 동기화하지 않습니다.";
-            if (!item.Folder && item.Size > MaxFile) return "Google 파일 전송은 현재 5 MiB 이하만 지원합니다.";
             return null;
         }
-        private async Task<HttpResponseMessage> Send(HttpRequestMessage request, CancellationToken ct, bool streaming = false)
+        private async Task<HttpResponseMessage> Send(HttpRequestMessage request, CancellationToken ct, bool streaming = false, bool allowIncomplete = false)
         {
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await account.AccessTokenAsync(ct));
             var response = await client.SendAsync(request, streaming ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead, ct);
             SyncDiagnostics.Write("googledrive.response", request.Method.Method, (int)response.StatusCode, response.Headers.ETag is { IsWeak: false });
+            if (allowIncomplete && (int)response.StatusCode == 308) return response;
             if (!response.IsSuccessStatusCode)
             {
                 var status = response.StatusCode; response.Dispose();
@@ -160,7 +160,8 @@ public sealed partial class GoogleDriveProvider
                 var buffer = new byte[65536]; await using var input = await response.Content.ReadAsStreamAsync(timeout.Token);
                 int read;
                 while ((read = await input.ReadAsync(buffer, timeout.Token)) != 0)
-                { if (stream.Length + read > MaxFile) throw new SyncPreconditionException("Google 파일은 현재 5 MiB 이하만 전송합니다."); await Policy.Bandwidth.WaitAsync(read, timeout.Token); await stream.WriteAsync(buffer.AsMemory(0, read), timeout.Token); }
+                { if (stream.Length + read > expected.Size) throw new SyncPreconditionException("다운로드 크기가 검사한 파일 크기와 다릅니다."); await Policy.Bandwidth.WaitAsync(read, timeout.Token); await stream.WriteAsync(buffer.AsMemory(0, read), timeout.Token); }
+                if (stream.Length != expected.Size) throw new SyncPreconditionException("불완전한 다운로드입니다.");
                 stream.Position = 0; var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, timeout.Token)); stream.Position = 0;
                 if (!Same(before, await Metadata(expected.Id, timeout.Token))) throw new SyncPreconditionException("다운로드 중 Google 파일이 변경되었습니다.");
                 return (stream, hash);
@@ -194,7 +195,7 @@ public sealed partial class GoogleDriveProvider
         {
             await using var data = Temp(); var buffer = new byte[65536]; int n;
             while ((n = await content.ReadAsync(buffer, ct)) != 0)
-            { if (data.Length + n > MaxFile) throw new SyncPreconditionException("Google 업로드는 현재 5 MiB 이하만 지원합니다."); await data.WriteAsync(buffer.AsMemory(0, n), ct); }
+            { await data.WriteAsync(buffer.AsMemory(0, n), ct); }
             data.Position = 0;
             if (Convert.ToHexString(await SHA256.HashDataAsync(data, ct)) != sha256) throw new SyncPreconditionException("업로드 해시 불일치");
             data.Position = 0;
@@ -202,6 +203,9 @@ public sealed partial class GoogleDriveProvider
             if (expected is null && existing is not null || expected is not null && (existing is null || expected.Path != path)) throw new SyncPreconditionException("Google 업로드 대상이 변경되었습니다.");
             if (existing is not null) existing = await Verify(existing, expected!, ct);
             var id = existing?.Id ?? await GenerateId(ct);
+            if (data.Length > MultipartThreshold) await UploadChunks(data, parent, existing, id, path, ct);
+            else
+            {
             using var body = new MultipartContent("related");
             body.Add(new StringContent(JsonSerializer.Serialize(existing is null ? new { id, name = Parts(path)[^1], parents = new[] { parent.Id } } : (object)new { }), Encoding.UTF8, "application/json"));
             var media = new StreamContent(data); media.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream"); body.Add(media);
@@ -211,10 +215,50 @@ public sealed partial class GoogleDriveProvider
             request.Options.Set(RequestTimeoutHandler.Budget, Policy.Bandwidth.TimeoutFor(data.Length + 4096));
             if (existing is not null) request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(existing.Tag!));
             using var response = await Send(request, ct);
+            }
             var (_, published) = await Resolve(path, ct);
             if (published?.Id != id) throw new SyncPreconditionException("게시 이후 Google 이름 충돌 또는 이동을 확인해야 합니다.");
             var (check, hash) = await Download(published, ct); await check.DisposeAsync();
             if (hash != sha256) throw new SyncPreconditionException("게시된 Google 파일 내용이 다릅니다.");
+        }
+        private async Task UploadChunks(FileStream data, Item parent, Item? existing, string id, string path, CancellationToken ct)
+        {
+            using var initiate = new HttpRequestMessage(existing is null ? HttpMethod.Post : HttpMethod.Patch,
+                "https://www.googleapis.com/upload/drive/v3/files" + (existing is null ? "" : "/" + Uri.EscapeDataString(id)) + "?uploadType=resumable");
+            initiate.Content = new StringContent(JsonSerializer.Serialize(existing is null ? new { id, name = Parts(path)[^1], parents = new[] { parent.Id } } : (object)new { }), Encoding.UTF8, "application/json");
+            initiate.Headers.TryAddWithoutValidation("X-Upload-Content-Type", "application/octet-stream");
+            initiate.Headers.TryAddWithoutValidation("X-Upload-Content-Length", data.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            if (existing is not null) initiate.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(existing.Tag!));
+            using var start = await Send(initiate, ct);
+            var location = start.Headers.Location;
+            if (location is null || !location.IsAbsoluteUri || location.Scheme != "https" || location.Host != "www.googleapis.com" ||
+                location.Port != 443 || location.UserInfo.Length != 0 || !location.AbsolutePath.StartsWith("/upload/drive/v3/files", StringComparison.Ordinal))
+                throw new SyncPreconditionException("Google 업로드 세션 주소가 올바르지 않습니다.");
+            var buffer = new byte[8 * 1024 * 1024];
+            long offset = 0;
+            while (offset < data.Length)
+            {
+                var count = (int)Math.Min(buffer.Length, data.Length - offset);
+                await data.ReadExactlyAsync(buffer.AsMemory(0, count), ct);
+                if (existing is not null && offset + count == data.Length && !Same(existing, await Metadata(existing.Id, ct)))
+                    throw new SyncPreconditionException("업로드 중 원격 파일이 변경되었습니다.");
+                using var chunk = new HttpRequestMessage(HttpMethod.Put, location);
+                var content = new ByteArrayContent(buffer, 0, count);
+                content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+                content.Headers.ContentRange = new ContentRangeHeaderValue(offset, offset + count - 1, data.Length);
+                chunk.Content = Policy.Bandwidth.Limit(content);
+                chunk.Options.Set(RequestTimeoutHandler.Budget, Policy.Bandwidth.TimeoutFor(count));
+                if (existing is not null) chunk.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(existing.Tag!));
+                using var response = await Send(chunk, ct, allowIncomplete: true);
+                offset += count;
+                if (offset < data.Length)
+                {
+                    if ((int)response.StatusCode != 308 || !response.Headers.TryGetValues("Range", out var ranges) ||
+                        ranges.SingleOrDefault() != "bytes=0-" + (offset - 1))
+                        throw new SyncPreconditionException("Google 업로드 진행 범위를 확인할 수 없습니다.");
+                }
+                else if (!response.IsSuccessStatusCode) throw new SyncPreconditionException("Google 업로드 완료를 확인할 수 없습니다.");
+            }
         }
         public async Task CreateDirectoryAsync(string path, CancellationToken ct)
         {

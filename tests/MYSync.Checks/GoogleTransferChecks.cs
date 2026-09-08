@@ -22,6 +22,8 @@ internal static class GoogleTransferChecks
         public int Writes, Trashes;
         public bool Race, LoseResponse, NoTag, Incomplete;
         private int ids = 10;
+        private readonly Dictionary<string, (Resource Item, MemoryStream Data, long Size)> uploads = [];
+        public int Chunks;
         public Server() => Items["root"] = new("root", "내 드라이브", "", Folder, [], 1);
         public void Seed(string id, string name, string parent, string content, string mime = "application/octet-stream") =>
             Items[id] = new(id, name, parent, mime, Encoding.UTF8.GetBytes(content), Items.TryGetValue(id, out var old) ? old.Version + 1 : 1);
@@ -38,6 +40,32 @@ internal static class GoogleTransferChecks
             {
                 var start = query.IndexOf("q='") + 3; var end = query.IndexOf("' in parents", start); var parent = query[start..end];
                 return Json(new { incompleteSearch = Incomplete, files = Items.Values.Where(x => x.Parent == parent && !x.Trashed).Select(Model).ToArray() });
+            }
+            if (query.Contains("uploadType=resumable"))
+            {
+                using var doc = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
+                var create = request.Method == HttpMethod.Post;
+                var uploadId = create ? doc.RootElement.GetProperty("id").GetString()! : path.Split('/').Last();
+                var resource = create ? new Resource(uploadId, doc.RootElement.GetProperty("name").GetString()!, doc.RootElement.GetProperty("parents")[0].GetString()!, "application/octet-stream", [], 0) : Items[uploadId];
+                if (!create && request.Headers.IfMatch.SingleOrDefault()?.ToString() != $"\"v{resource.Version}\"") return new(HttpStatusCode.PreconditionFailed);
+                uploads[uploadId] = (resource, new MemoryStream(), long.Parse(request.Headers.GetValues("X-Upload-Content-Length").Single()));
+                var response = new HttpResponseMessage(HttpStatusCode.OK);
+                response.Headers.Location = new Uri("https://www.googleapis.com/upload/drive/v3/files?upload_id=" + uploadId);
+                return response;
+            }
+            if (request.Method == HttpMethod.Put && query.StartsWith("?upload_id="))
+            {
+                var uploadId = query["?upload_id=".Length..]; var upload = uploads[uploadId];
+                var range = request.Content!.Headers.ContentRange!;
+                if (range.From != upload.Data.Length || range.Length != upload.Size) throw new Exception("incorrect chunk range");
+                await request.Content.CopyToAsync(upload.Data, ct); Chunks++;
+                if (upload.Data.Length < upload.Size)
+                {
+                    var response = new HttpResponseMessage((HttpStatusCode)308);
+                    response.Headers.TryAddWithoutValidation("Range", "bytes=0-" + (upload.Data.Length - 1)); return response;
+                }
+                Items[uploadId] = upload.Item with { Data = upload.Data.ToArray(), Version = upload.Item.Version + 1 };
+                upload.Data.Dispose(); uploads.Remove(uploadId); Writes++; return Json(new { id = uploadId });
             }
             var id = path.Split('/').Last(); Items.TryGetValue(id, out var current);
             if (request.Method == HttpMethod.Get)
@@ -127,6 +155,12 @@ internal static class GoogleTransferChecks
         var skipped = await remote.ScanAsync(default);
         Check(skipped.IsComplete && skipped.Unsupported.Count == 2 && skipped.Entries.All(x => x.Path != "duplicate"), "Google unsupported/duplicate reporting failed");
         server.Incomplete = true; Check(!(await remote.ScanAsync(default)).IsComplete, "incomplete Google scan accepted"); server.Incomplete = false;
+        var bigPayload = new string('L', 9 * 1024 * 1024 + 17);
+        await remote.PutFileAsync("big.dat", null, Data(bigPayload), Hash(bigPayload), default);
+        Check(server.Chunks == 2, "large upload did not use bounded chunks");
+        var bigEntry = (await remote.ScanAsync(default)).Entries.Single(x => x.Path == "big.dat");
+        await using (var bigRead = await remote.OpenReadAsync(bigEntry, default))
+            Check(bigRead.Length == bigPayload.Length, "large download truncated");
         var writes = server.Writes; using var large = new MemoryStream(new byte[5 * 1024 * 1024 + 1]);
         await Reject(() => remote.PutFileAsync("large.bin", null, large, "unused", default)); Check(server.Writes == writes, "oversized upload mutated server");
 

@@ -26,7 +26,7 @@ public sealed partial class GoogleDriveProvider : IProvider, IConfigurableProvid
     public bool IsConnected => session is not null;
     public IReadOnlyList<ConnectionField> ConnectionFields => [];
     public string LoginButtonText => "Google로 로그인";
-    public string ConnectionInstructions => "Google로 로그인하여 파일 관리 권한을 승인하세요. 현재 파일 전송은 5 MiB 이하를 지원합니다.";
+    public string ConnectionInstructions => "Google로 로그인하여 파일 관리 권한을 승인하세요. 대용량 파일은 청크 단위로 전송합니다.";
     public async Task ConnectAsync(IReadOnlyDictionary<string, string> values, CancellationToken ct)
     {
         // Saved accounts retain their original OAuth client binding. New logins use the distributor configuration.

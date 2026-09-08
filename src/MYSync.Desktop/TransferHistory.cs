@@ -16,7 +16,12 @@ public sealed class TransferHistory
         {
             var row = Rows.FirstOrDefault(x => x.ActivityId == report.ActivityId);
             if (row is null) { row = new(pairId, name, report); Rows.Insert(0, row); }
+            if (report.Event == TransferEvent.Started) Rows.Move(Rows.IndexOf(row), 0);
             SessionBytes += row.Apply(report);
+        }
+        else if (report.Event == TransferEvent.Held)
+        {
+            foreach (var row in Rows.Where(x => x.RunId == report.RunId && x.Applied && !x.Done)) row.Finish("검증 보류");
         }
         else if (report.Phase is SyncPhase.Idle or SyncPhase.Attention)
         {

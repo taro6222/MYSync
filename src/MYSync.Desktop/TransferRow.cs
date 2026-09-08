@@ -35,6 +35,7 @@ public sealed class TransferRow(Guid pairId, string name, SyncProgress initial) 
     public event PropertyChangedEventHandler? PropertyChanged;
     public long Apply(SyncProgress report)
     {
+        if (Done) return 0;
         Message = report.Message;
         var delta = 0L;
         if (report.Event == TransferEvent.Retrying) attemptBytes = 0;
@@ -48,6 +49,9 @@ public sealed class TransferRow(Guid pairId, string name, SyncProgress initial) 
             SyncPhase.Transferring => "전송 중", SyncPhase.Verifying => "검증 대기",
             SyncPhase.Attention => "확인 필요", _ => "검사 중"
         };
+        if (report.Event == TransferEvent.Queued) State = "대기 중";
+        if (report.Event == TransferEvent.Held) Finish(report.Message);
+        if (report.Event == TransferEvent.Started) clock.Restart();
         if (report.Event == TransferEvent.Applied) Applied = true;
         if (report.Event == TransferEvent.Retrying) State = "재시도 대기";
         if (report.Event is TransferEvent.Failed or TransferEvent.Cancelled)

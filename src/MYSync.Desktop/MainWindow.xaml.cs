@@ -22,6 +22,8 @@ public partial class MainWindow : Window
     private readonly SettingsStore store;
     private readonly AccountStore accountStore;
     private Guid? activeAccountId;
+    private readonly Dictionary<Guid, TransferControl> transferControls = [];
+    private TransferControl ControlFor(Guid id) { if (!transferControls.TryGetValue(id, out var value)) transferControls[id] = value = new(); return value; }
     private string draftExclusions = "";
     private long draftSpeed;
     private readonly Queue<SyncAlert> notificationQueue = new();
@@ -56,6 +58,10 @@ public partial class MainWindow : Window
         MainTabs.IsEnabledChanged += (_, _) => UpdatePreview();
         try { preferences = preferencesStore.Load(); }
         catch (Exception ex) { StatusText.Text = "앱 설정 읽기 실패: " + ex.Message; }
+        SyncDiagnostics.DirectoryPath = Path.Combine(AppContext.BaseDirectory, ",log");
+        SyncDiagnostics.MaxBytes = Math.Clamp(preferences.LogLimitMiB, 1, 1024) * 1024L * 1024;
+        LogLimitBox.Text = preferences.LogLimitMiB.ToString();
+        LogPathText.Text = SyncDiagnostics.DirectoryPath;
         CloseToTrayBox.IsChecked = preferences.CloseToTray;
         try { StartupBox.IsChecked = StartupRegistration.Enabled; }
         catch (Exception ex) { StatusText.Text = "로그인 설정 읽기 실패: " + ex.Message; }
@@ -130,7 +136,7 @@ public partial class MainWindow : Window
     }
     private void CloseToTrayChanged(object sender, RoutedEventArgs e)
     {
-        try { var updated = new DesktopPreferences(CloseToTrayBox.IsChecked == true); preferencesStore.Save(updated); preferences = updated; }
+        try { var updated = preferences with { CloseToTray = CloseToTrayBox.IsChecked == true }; preferencesStore.Save(updated); preferences = updated; }
         catch (Exception ex) { CloseToTrayBox.IsChecked = preferences.CloseToTray; StatusText.Text = "설정 저장 실패: " + ex.Message; }
     }
     private void StartupChanged(object sender, RoutedEventArgs e)
@@ -142,8 +148,10 @@ public partial class MainWindow : Window
             StatusText.Text = "로그인 설정 실패: " + ex.Message;
         }
     }
+    private void ShowSync(object sender, RoutedEventArgs e) => MainTabs.SelectedIndex = 0;
+    private void ShowTransfers(object sender, RoutedEventArgs e) => MainTabs.SelectedIndex = 2;
     private void ShowAdd(object sender, RoutedEventArgs e) => MainTabs.SelectedIndex = 1;
-    private void OpenSync(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new SyncRunWindow(pair, provider, accountStore, recovery, journalPath, ProgressFor(pair, true)));
+    private void OpenSync(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new SyncRunWindow(pair, provider, accountStore, recovery, journalPath, ProgressFor(pair, true), ControlFor(pair.Id), (path, kind) => SaveFileExclusion(pair.Id, path, kind)));
     private void OpenResolve(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new ResolveWindow(pair, provider, accountStore, recovery, journalPath));
     private void OpenPairWindow(object sender, Func<SyncPair, IProvider, string, string, Window> create)
     {
@@ -165,6 +173,8 @@ public partial class MainWindow : Window
         new Progress<SyncProgress>(report =>
         {
             model.History.Apply(pair.Id, pair.RemoteFolderName, report);
+            if (report.Event != TransferEvent.None || report.Phase is SyncPhase.Idle or SyncPhase.Attention)
+            { using var scope = SyncDiagnostics.BeginJob(pair.Id, 0); SyncDiagnostics.Write("transfer.state", phase: report.Phase + "/" + report.Event, bytes: report.Bytes); }
             if (notify && report.Phase == SyncPhase.Attention && report.ActivityId == Guid.Empty) AddAlert(pair, report.Message);
             UpdateIndicators();
         });
@@ -294,6 +304,7 @@ public partial class MainWindow : Window
             journal.SkipExcluded(pair.Id, policy.Exclusions);
             var local = new PolicyEndpoint(new LocalEndpoint(pair.LocalPath, recovery), policy);
             var progress = ProgressFor(pair);
+            var fileControl = ControlFor(pair.Id);
             ISyncEndpoint? remote = null;
             monitor = new SyncMonitor(pair.LocalPath, async ct =>
             {
@@ -309,7 +320,7 @@ public partial class MainWindow : Window
                 if (!plan.CanExecute)
                 { progress.Report(new SyncProgress(SyncPhase.Attention, string.Join(" / ", plan.Errors))); return new ExecutionReport(false, plan.Errors); }
                 if (journal.ReadJobs(pair.Id).All(x => x.State == JobState.Completed)) journal.Enqueue(pair.Id, plan);
-                return await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, ct, progress);
+                return await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, ct, progress, fileControl);
             });
             var run = new AutoRun(monitor, session, runLock);
             monitor.StatusChanged += status => Dispatcher.BeginInvoke(new Action(() =>
@@ -531,6 +542,7 @@ public partial class MainWindow : Window
     {
         if (lastAlert.TryGetValue(pair.Id, out var previous) && previous == message) return;
         lastAlert[pair.Id] = message;
+        using (SyncDiagnostics.BeginJob(pair.Id, 0)) SyncDiagnostics.Write("sync.attention", phase: "NeedsAttention");
         var alert = new SyncAlert(pair.Id, pair.RemoteFolderName, message);
         model.Alerts.Insert(0, alert);
         if (model.Alerts.Count > 200) model.Alerts.RemoveAt(model.Alerts.Count - 1);
@@ -565,6 +577,56 @@ public partial class MainWindow : Window
         MainTabs.SelectedIndex = 1;
         ProvidersBox.SelectedItem = model.Providers.FirstOrDefault(x => x.Id == pair.ProviderId);
         AccountsBox.SelectedItem = AccountsBox.Items.Cast<SavedAccount>().FirstOrDefault(x => x.Id == pair.AccountId);
+    }
+    private void SaveLogSettings(object sender, RoutedEventArgs e)
+    {
+        if (!int.TryParse(LogLimitBox.Text, out var size) || size is < 1 or > 1024) { StatusText.Text = "로그 크기는 1~1024 MiB로 입력하세요."; return; }
+        try { var next = preferences with { LogLimitMiB = size }; preferencesStore.Save(next); preferences = next; SyncDiagnostics.MaxBytes = size * 1024L * 1024; SyncDiagnostics.Write("log.settings"); StatusText.Text = "로그 용량을 저장했습니다."; }
+        catch (Exception ex) { StatusText.Text = ex.Message; }
+    }
+    private void OpenLogs(object sender, RoutedEventArgs e)
+    {
+        try { Directory.CreateDirectory(SyncDiagnostics.DirectoryPath); System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(SyncDiagnostics.DirectoryPath) { UseShellExecute = true }); }
+        catch (Exception ex) { StatusText.Text = ex.Message; }
+    }
+    private void HoldTransfer(object sender, RoutedEventArgs e)
+    {
+        if (TransfersGrid.SelectedItem is not TransferRow row || row.Done) return;
+        if (row.Applied) { StatusText.Text = "이미 반영된 파일은 최종 검증 중입니다."; return; }
+        var state = (sender as Button)?.Tag as string ?? "중지";
+        ControlFor(row.PairId).Hold(row.Path, state);
+        row.Apply(new(SyncPhase.Idle, state, Event: TransferEvent.Held));
+        StatusText.Text = "해당 파일을 " + state + "했습니다. 이미 반영된 내용은 되돌리지 않으며 재개 시 다시 검사합니다.";
+    }
+    private void ResumeTransfer(object sender, RoutedEventArgs e)
+    {
+        if (TransfersGrid.SelectedItem is not TransferRow row) return;
+        ControlFor(row.PairId).Resume(row.Path);
+        if (autoRuns.TryGetValue(row.PairId, out var run)) run.Monitor.RequestScan();
+        StatusText.Text = "파일 보류를 해제했습니다. 자동 감시 또는 다음 수동 실행에서 재검사합니다.";
+    }
+    private SyncPair SaveFileExclusion(Guid id, string path, EntryKind kind)
+    {
+        if (path.IndexOfAny(['*', '?']) >= 0) throw new InvalidOperationException("특수 문자가 있는 경로는 연결 설정에서 제외하세요.");
+        var pair = model.Pairs.Single(x => x.Id == id);
+        var updated = pair with { Exclusions = pair.Exclusions + "\n/" + path + (kind == EntryKind.Directory ? "/" : ""), Paused = true };
+        store.Save(updated); model.Pairs[model.Pairs.IndexOf(pair)] = updated; return updated;
+    }
+    private async void ExcludeTransfer(object sender, RoutedEventArgs e)
+    {
+        if (TransfersGrid.SelectedItem is not TransferRow row) return;
+        var pair = model.Pairs.FirstOrDefault(x => x.Id == row.PairId);
+        if (pair is null) return;
+        if (row.Path.IndexOfAny(['*', '?']) >= 0) { StatusText.Text = "이 경로는 연결 설정에서 제외 규칙을 지정하세요."; return; }
+        try
+        {
+            await StopAuto(pair.Id, true);
+            var rule = "/" + row.Path + (row.IsFile ? "" : "/");
+            var updated = pair with { Exclusions = pair.Exclusions + "\n" + rule, Paused = true };
+            store.Save(updated); model.Pairs[model.Pairs.ToList().FindIndex(x => x.Id == pair.Id)] = updated;
+            StatusText.Text = "제외 규칙을 저장했습니다. 자동 시작으로 나머지 파일을 동기화하세요.";
+        }
+        catch (Exception ex) { StatusText.Text = ex.Message; }
     }
     private static bool Overlaps(string a, string b)
     {

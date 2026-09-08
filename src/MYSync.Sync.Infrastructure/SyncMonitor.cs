@@ -56,6 +56,7 @@ public sealed class SyncMonitor : IAsyncDisposable
                 {
                     report = new(false, [ex.Message], SyncExecutor.Classify(ex) == MYSync.Sync.Core.SyncFailureKind.Transient);
                 }
+                if (report.UserDeferred) { Report(MonitorState.Watching, "중지·취소한 파일 재개 대기 · 자동 켜짐 유지"); continue; }
                 if (!report.Converged)
                 {
                     // Only failures the engine classified as transient are retried, and only a bounded number of times.

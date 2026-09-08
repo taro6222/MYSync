@@ -55,4 +55,5 @@ if (File.Exists(Path.Combine(root, ".tools", "google", "oauth-client.json")))
     if (!embedded.ContainsKey("client_id") || !embedded.ContainsKey("client_secret")) throw new Exception("Embedded OAuth configuration missing");
     Console.WriteLine("PASS: embedded Google OAuth configuration loads without a plugin-side JSON");
 }
+await TransferControlChecks.Run(scratch);
 Console.WriteLine("All checks passed.");

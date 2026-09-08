@@ -12,13 +12,14 @@ public sealed class SyncExclusions
         foreach (var raw in text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
         {
             var value = raw.Replace('\\', '/');
-            if (value.Length > 256 || rules.Count >= 200 || value.StartsWith('/') || value.Contains(':') ||
+            if (value.Length > 256 || rules.Count >= 200 || value.Contains(':') ||
                 value.Any(char.IsControl) || value.Split('/').Any(x => x is "." or ".."))
                 throw new ArgumentException("제외 규칙은 256자 이하의 상대 경로로 입력하세요 (최대 200개).");
+            var rooted = value.StartsWith('/'); value = value.TrimStart('/');
             var folder = value.EndsWith('/'); value = value.TrimEnd('/');
             if (value.Length == 0) throw new ArgumentException("빈 제외 규칙입니다.");
             var expression = Regex.Escape(value).Replace(@"\*\*/", "(?:.*/)?").Replace(@"\*\*", ".*").Replace(@"\*", "[^/]*").Replace(@"\?", "[^/]");
-            rules.Add((new Regex("^" + expression + "$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking, TimeSpan.FromMilliseconds(100)), folder, value.Contains('/')));
+            rules.Add((new Regex("^" + expression + "$", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking, TimeSpan.FromMilliseconds(100)), folder, rooted || value.Contains('/')));
         }
     }
     public bool Matches(string path, EntryKind kind)

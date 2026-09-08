@@ -9,7 +9,9 @@ namespace MYSync.Desktop;
 
 public sealed class SyncRunWindow : Window
 {
-    private readonly SyncPair pair;
+    private readonly TransferControl? control;
+    private SyncPair pair;
+    private Task? executionTask;
     private readonly IProvider provider;
     private readonly AccountStore accounts;
     private readonly SyncJournal journal;
@@ -26,8 +28,9 @@ public sealed class SyncRunWindow : Window
     private ISyncEndpoint? remote;
     private SyncPlan? plan;
     private bool resume;
-    public SyncRunWindow(SyncPair pair, IProvider provider, AccountStore accounts, string recovery, string journalPath, IProgress<SyncProgress>? progress = null)
+    public SyncRunWindow(SyncPair pair, IProvider provider, AccountStore accounts, string recovery, string journalPath, IProgress<SyncProgress>? progress = null, TransferControl? control = null, Func<string, EntryKind, SyncPair>? exclude = null)
     {
+        this.control = control;
         this.pair = pair; this.provider = provider; this.accounts = accounts; this.recovery = recovery; this.progress = progress;
         runLock = new Mutex(false, "Local\\MYSync-pair-" + pair.Id.ToString("N"));
         bool acquired;
@@ -44,9 +47,31 @@ public sealed class SyncRunWindow : Window
         grid.Columns.Add(new DataGridTextColumn { Header = "이유", Binding = new System.Windows.Data.Binding("Reason"), Width = new DataGridLength(1, DataGridLengthUnitType.Star) });
         Grid.SetRow(grid, 1); layout.Children.Add(grid);
         Grid.SetRow(status, 2); layout.Children.Add(status);
-        var buttons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 16, 0, 0) }; buttons.Children.Add(inspect); buttons.Children.Add(execute); buttons.Children.Add(cancel);
+        var buttons = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 16, 0, 0) }; buttons.Children.Add(inspect); buttons.Children.Add(execute); buttons.Children.Add(cancel);
+        foreach (var label in new[] { "파일 중지", "파일 취소", "파일 재개", "파일 제외" })
+        {
+            var action = new Button { Content = label, Margin = new Thickness(8,0,0,0), Padding = new Thickness(8,6,8,6) };
+            action.Click += async (_, _) =>
+            {
+                if (grid.SelectedItem is not PlannedOperation selected) return;
+                try
+                {
+                    if (label == "파일 재개") control?.Resume(selected.Path);
+                    else if (label == "파일 제외" && exclude is not null)
+                    {
+                        operation?.Cancel();
+                        if (executionTask is not null) await executionTask;
+                        pair = exclude(selected.Path, (selected.ExpectedLocal ?? selected.ExpectedRemote)?.Kind ?? EntryKind.File);
+                        plan = null; status.Text = "제외했습니다. 변경 검사로 나머지 파일을 다시 확인하세요.";
+                    }
+                    else control?.Hold(selected.Path, label == "파일 중지" ? "중지" : "취소");
+                }
+                catch (Exception ex) { status.Text = ex.Message; }
+            };
+            buttons.Children.Add(action);
+        }
         Grid.SetRow(buttons, 3); layout.Children.Add(buttons); Content = layout;
-        inspect.Click += async (_, _) => await InspectAsync(); execute.Click += async (_, _) => await ExecuteAsync(); cancel.Click += (_, _) => operation?.Cancel();
+        inspect.Click += async (_, _) => await InspectAsync(); execute.Click += async (_, _) => { executionTask = ExecuteAsync(); await executionTask; }; cancel.Click += (_, _) => operation?.Cancel();
         Closing += (_, e) => { if (operation is not null) { e.Cancel = true; operation.Cancel(); status.Text = "중단 처리 중입니다. 완료 후 창을 닫으세요."; } };
         Closed += (_, _) => { runLock.ReleaseMutex(); runLock.Dispose(); };
         status.Text = "수동 실행입니다. 원격 파일 내용 검사에는 다운로드가 필요할 수 있습니다.";
@@ -94,7 +119,7 @@ public sealed class SyncRunWindow : Window
         {
             status.Text = "동기화 중…";
             if (!resume) journal.Enqueue(pair.Id, plan);
-            var report = await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, operation!.Token, progress);
+            var report = await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, operation!.Token, progress, control);
             status.Text = (report.Converged ? "양쪽 폴더의 내용이 일치합니다. 동기화를 완료했습니다." : "완료되지 않은 항목이 있습니다. " + string.Join(" / ", report.Issues))
                 + (report.Notices.Count == 0 ? "" : "\n미지원 항목 " + report.Notices.Count + "개: " + string.Join(" / ", report.Notices.Take(5)));
         }
