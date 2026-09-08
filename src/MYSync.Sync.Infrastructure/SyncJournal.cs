@@ -220,6 +220,10 @@ public sealed class SyncJournal
     /// and any resolution that would change the planned work for another path. Both conflict copies stay on disk.
     /// </summary>
     public ConflictResolution ResolveConflict(Guid pair, long jobId, ScanResult local, ScanResult remote, bool keepLocal)
+        => ResolveChoice(pair, jobId, local, remote, keepLocal, true);
+    public ConflictResolution ResolveFileChoice(Guid pair, long jobId, ScanResult local, ScanResult remote, bool keepLocal)
+        => ResolveChoice(pair, jobId, local, remote, keepLocal, false);
+    private ConflictResolution ResolveChoice(Guid pair, long jobId, ScanResult local, ScanResult remote, bool keepLocal, bool conflictOnly)
     {
         if (!local.IsComplete || !remote.IsComplete) throw new InvalidOperationException("불완전한 검사 결과로는 충돌을 해결할 수 없습니다.");
         using var c = Open(); using var tx = c.BeginTransaction();
@@ -233,7 +237,7 @@ public sealed class SyncJournal
             job = new(reader.GetInt64(0), pair, JsonSerializer.Deserialize<PlannedOperation>(reader.GetString(1))!, (JobState)reader.GetInt32(2));
         }
         var op = job.Operation;
-        if (job.State != JobState.NeedsReconcile || op.Action != SyncAction.Conflict) throw new InvalidOperationException("미해결 충돌만 해결할 수 있습니다.");
+        if (job.State is JobState.Running or JobState.Completed || conflictOnly && (job.State != JobState.NeedsReconcile || op.Action != SyncAction.Conflict)) throw new InvalidOperationException("미해결 충돌만 해결할 수 있습니다.");
         if (op.ExpectedLocal?.Kind == EntryKind.Directory || op.ExpectedRemote?.Kind == EntryKind.Directory) throw new InvalidOperationException("폴더·유형 충돌은 이 화면에서 해결하지 않습니다.");
         var currentLocal = local.Entries.SingleOrDefault(x => string.Equals(x.Path, op.Path, StringComparison.OrdinalIgnoreCase));
         var currentRemote = remote.Entries.SingleOrDefault(x => string.Equals(x.Path, op.Path, StringComparison.OrdinalIgnoreCase));
@@ -267,7 +271,7 @@ public sealed class SyncJournal
                 " INSERT INTO Jobs(PairId,Payload,State) VALUES($pair,$job,$pending);";
             write.Parameters.AddWithValue("$pair", pair.ToString()); write.Parameters.AddWithValue("$payload", JsonSerializer.Serialize(baseline));
             write.Parameters.AddWithValue("$done", (int)JobState.Completed); write.Parameters.AddWithValue("$id", jobId);
-            write.Parameters.AddWithValue("$reconcile", (int)JobState.NeedsReconcile);
+            write.Parameters.AddWithValue("$reconcile", (int)job.State);
             write.Parameters.AddWithValue("$job", JsonSerializer.Serialize(resolved)); write.Parameters.AddWithValue("$pending", (int)JobState.Pending);
             write.ExecuteNonQuery();
         }

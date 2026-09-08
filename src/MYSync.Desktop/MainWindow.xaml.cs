@@ -152,7 +152,7 @@ public partial class MainWindow : Window
     private void ShowTransfers(object sender, RoutedEventArgs e) => MainTabs.SelectedIndex = 2;
     private void ShowAdd(object sender, RoutedEventArgs e) => MainTabs.SelectedIndex = 1;
     private void OpenSync(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new SyncRunWindow(pair, provider, accountStore, recovery, journalPath, ProgressFor(pair, true), ControlFor(pair.Id), (path, kind) => SaveFileExclusion(pair.Id, path, kind)));
-    private void OpenResolve(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new ResolveWindow(pair, provider, accountStore, recovery, journalPath));
+    private void OpenResolve(object sender, RoutedEventArgs e) => OpenPairWindow(sender, (pair, provider, recovery, journalPath) => new ResolveWindow(pair, provider, accountStore, recovery, journalPath, ControlFor(pair.Id), ProgressFor(pair)));
     private void OpenPairWindow(object sender, Func<SyncPair, IProvider, string, string, Window> create)
     {
         if ((sender as FrameworkElement)?.DataContext is not SyncPair pair) return;
@@ -165,6 +165,9 @@ public partial class MainWindow : Window
             var journalPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "MYSync", "journals", pair.Id.ToString("N") + ".db");
             var window = create(pair, provider, recovery, journalPath);
             window.Owner = this; window.ShowDialog();
+            if (window is ResolveWindow resolved)
+                foreach (var row in model.History.Rows.Where(x => x.PairId == pair.Id && resolved.ResolvedPaths.ContainsKey(x.Path) && x.State is "확인 필요" or "검증 보류" or "미실행"))
+                    row.MarkHandled(resolved.ResolvedPaths[row.Path]);
         }
         catch (Exception ex) { StatusText.Text = ex.Message; }
         finally { activeAccountId = null; RemoteBox.ItemsSource = null; }
@@ -565,7 +568,7 @@ public partial class MainWindow : Window
         try
         {
             await StopAuto(pair.Id, true);
-            OpenPairWindow(new Button { DataContext = pair }, (p, provider, recovery, journal) => new ResolveWindow(p, provider, accountStore, recovery, journal));
+            OpenPairWindow(new Button { DataContext = pair }, (p, provider, recovery, journal) => new ResolveWindow(p, provider, accountStore, recovery, journal, ControlFor(p.Id), ProgressFor(p)));
         }
         catch (Exception ex) { StatusText.Text = ex.Message; }
         finally { MainTabs.IsEnabled = true; }
@@ -599,9 +602,35 @@ public partial class MainWindow : Window
         row.Apply(new(SyncPhase.Idle, state, Event: TransferEvent.Held));
         StatusText.Text = "해당 파일을 " + state + "했습니다. 이미 반영된 내용은 되돌리지 않으며 재개 시 다시 검사합니다.";
     }
+    private async void OpenTransferResolution(object sender, RoutedEventArgs e)
+    {
+        if (TransfersGrid.SelectedItem is not TransferRow row) return;
+        var pair = model.Pairs.FirstOrDefault(x => x.Id == row.PairId);
+        if (pair is null) { StatusText.Text = "삭제된 연결의 기록입니다."; return; }
+        var resume = autoRuns.ContainsKey(pair.Id);
+        MainTabs.IsEnabled = false;
+        try
+        {
+            await StopAuto(pair.Id, true);
+            OpenPairWindow(new Button { DataContext = pair }, (p, provider, recovery, journal) =>
+                new ResolveWindow(p, provider, accountStore, recovery, journal, ControlFor(p.Id), ProgressFor(p), row.Path));
+            if (resume) StartAuto(model.Pairs.Single(x => x.Id == pair.Id));
+        }
+        catch (Exception ex) { StatusText.Text = "오류 해결 화면: " + ex.Message; }
+        finally { MainTabs.IsEnabled = true; }
+    }
+    private void SkipTransferOnce(object sender, RoutedEventArgs e)
+    {
+        if (TransfersGrid.SelectedItem is not TransferRow row) return;
+        ControlFor(row.PairId).SkipOnce(row.Path);
+        row.MarkHandled("이번 실행 제외");
+        if (autoRuns.TryGetValue(row.PairId, out var run)) run.Monitor.RequestScan();
+        StatusText.Text = "현재 실행 중이면 이번에, 아니면 다음 실행에서 한 번 제외합니다. 이후 다시 동기화 대상이 됩니다.";
+    }
     private void ResumeTransfer(object sender, RoutedEventArgs e)
     {
         if (TransfersGrid.SelectedItem is not TransferRow row) return;
+        if (row.State is "확인 필요" or "검증 보류") { OpenTransferResolution(sender, e); return; }
         ControlFor(row.PairId).Resume(row.Path);
         if (autoRuns.TryGetValue(row.PairId, out var run)) run.Monitor.RequestScan();
         StatusText.Text = "파일 보류를 해제했습니다. 자동 감시 또는 다음 수동 실행에서 재검사합니다.";

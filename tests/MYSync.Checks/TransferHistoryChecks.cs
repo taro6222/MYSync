@@ -30,6 +30,12 @@ internal static class TransferHistoryChecks
         history.Apply(pair, "pair", cancelled with { Phase = SyncPhase.Idle, Event = TransferEvent.Cancelled });
         Check(history.Rows.Count == 3 && history.Rows[0].State == "중단", "repeat path overwrote past record or cancellation missing");
         Check(history.CompletedFiles == 2, "cancelled file counted as successful");
+        var pending = first with { RunId = Guid.NewGuid(), ActivityId = Guid.NewGuid(), Event = TransferEvent.Queued };
+        history.Apply(pair, "pair", pending);
+        history.Apply(pair, "pair", new(SyncPhase.Attention, "scan interrupted", RunId: pending.RunId));
+        Check(history.Rows[0].State == "미실행", "global scan error falsely labelled a pending file as failed");
+        history.Rows[0].MarkHandled("재검사 완료");
+        Check(history.Rows[0].State == "재검사 완료", "resolved history retained an actionable error");
         for (var i = 0; i < TransferHistory.Limit + 2; i++)
         {
             var item = first with { RunId = Guid.NewGuid(), ActivityId = Guid.NewGuid() };

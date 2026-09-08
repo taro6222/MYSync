@@ -60,6 +60,11 @@ public sealed class TransferRow(Guid pairId, string name, SyncProgress initial) 
         Refresh();
         return delta;
     }
+    public void MarkHandled(string state)
+    {
+        Message += "\n후속 처리: " + state;
+        State = state; Done = true; clock.Stop(); Refresh();
+    }
     public void Finish(string state)
     {
         if (Done) return;

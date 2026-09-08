@@ -30,7 +30,7 @@ public sealed class TransferHistory
             foreach (var row in Rows.Where(x => x.RunId == report.RunId && !x.Done))
             {
                 var completed = report.Phase == SyncPhase.Idle && row.Applied;
-                row.Finish(completed ? "완료" : "확인 필요");
+                row.Finish(completed ? "완료" : row.Applied ? "검증 보류" : "미실행");
                 if (completed && row.IsFile) CompletedFiles++;
             }
             if (report.Phase == SyncPhase.Idle) LastSynchronized = DateTime.Now;

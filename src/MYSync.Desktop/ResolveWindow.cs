@@ -13,6 +13,11 @@ public sealed class ResolveWindow : Window
 {
     private sealed record JobRow(long Id, string State, string Action, string Path, string Reason, string Copies, bool Resolvable);
 
+    public Dictionary<string, string> ResolvedPaths { get; } = new(StringComparer.OrdinalIgnoreCase);
+    private readonly TransferControl control;
+    private readonly IProgress<SyncProgress>? progress;
+    private string? selectedPath;
+    private readonly Button skipOnce = new() { Content = "이번만 제외·나머지 실행", IsEnabled = false, Margin = new Thickness(10, 0, 0, 0), Padding = new Thickness(14, 7, 14, 7) };
     private readonly SyncPair pair;
     private readonly IProvider provider;
     private readonly AccountStore accounts;
@@ -25,8 +30,8 @@ public sealed class ResolveWindow : Window
     private readonly TextBlock detail = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0), Foreground = System.Windows.Media.Brushes.DimGray };
     private readonly TextBlock status = new() { TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 14, 0, 0) };
     private readonly Button scan = new() { Content = "연결·현재 상태 검사", Padding = new Thickness(14, 7, 14, 7) };
-    private readonly Button keepLocal = new() { Content = "로컬 파일 우선", IsEnabled = false, Margin = new Thickness(10, 0, 0, 0), Padding = new Thickness(14, 7, 14, 7) };
-    private readonly Button keepRemote = new() { Content = "원격 파일 우선", IsEnabled = false, Margin = new Thickness(10, 0, 0, 0), Padding = new Thickness(14, 7, 14, 7) };
+    private readonly Button keepLocal = new() { Content = "로컬 → 클라우드 전송", IsEnabled = false, Margin = new Thickness(10, 0, 0, 0), Padding = new Thickness(14, 7, 14, 7) };
+    private readonly Button keepRemote = new() { Content = "클라우드 → 로컬 전송", IsEnabled = false, Margin = new Thickness(10, 0, 0, 0), Padding = new Thickness(14, 7, 14, 7) };
     private readonly Button reload = new() { Content = "다시 조회", Padding = new Thickness(14, 7, 14, 7) };
     private readonly Button restore = new() { Content = "보관본을 다른 위치로 복원…", IsEnabled = false, Margin = new Thickness(10, 0, 0, 0), Padding = new Thickness(14, 7, 14, 7) };
     private readonly Button acknowledge = new() { Content = "확인 처리", IsEnabled = false, Margin = new Thickness(10, 0, 0, 0), Padding = new Thickness(14, 7, 14, 7) };
@@ -39,8 +44,9 @@ public sealed class ResolveWindow : Window
     private ScanResult? localScan;
     private ScanResult? remoteScan;
 
-    public ResolveWindow(SyncPair pair, IProvider provider, AccountStore accounts, string recovery, string journalPath)
+    public ResolveWindow(SyncPair pair, IProvider provider, AccountStore accounts, string recovery, string journalPath, TransferControl? control = null, IProgress<SyncProgress>? progress = null, string? selectedPath = null)
     {
+        this.control = control ?? new(); this.progress = progress; this.selectedPath = selectedPath;
         this.pair = pair; this.provider = provider; this.accounts = accounts; this.recovery = recovery;
         recoveryStore = new RecoveryStore(recovery);
         runLock = new Mutex(false, "Local\\MYSync-pair-" + pair.Id.ToString("N"));
@@ -76,8 +82,8 @@ public sealed class ResolveWindow : Window
         records.Columns.Add(new DataGridTextColumn { Header = "보관 경로", Binding = new System.Windows.Data.Binding("BackupPath"), Width = new DataGridLength(1.4, DataGridLengthUnitType.Star) });
         records.SelectionChanged += (_, _) => UpdateRecordButtons();
 
-        var jobButtons = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 14, 0, 0) };
-        jobButtons.Children.Add(scan); jobButtons.Children.Add(keepLocal); jobButtons.Children.Add(keepRemote);
+        var jobButtons = new WrapPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 14, 0, 0) };
+        jobButtons.Children.Add(scan); jobButtons.Children.Add(keepLocal); jobButtons.Children.Add(keepRemote); jobButtons.Children.Add(skipOnce);
         var jobPanel = new DockPanel { Margin = new Thickness(0, 14, 0, 0) };
         DockPanel.SetDock(jobButtons, Dock.Bottom); jobPanel.Children.Add(jobButtons); jobPanel.Children.Add(jobs);
 
@@ -98,6 +104,7 @@ public sealed class ResolveWindow : Window
         scan.Click += async (_, _) => await ScanAsync();
         keepLocal.Click += async (_, _) => await ResolveAsync(true);
         keepRemote.Click += async (_, _) => await ResolveAsync(false);
+        skipOnce.Click += async (_, _) => await SkipOnceAsync();
         reload.Click += async (_, _) => await LoadRecordsAsync();
         restore.Click += async (_, _) => await RestoreAsync();
         acknowledge.Click += async (_, _) => await AcknowledgeAsync();
@@ -106,23 +113,25 @@ public sealed class ResolveWindow : Window
         Closed += (_, _) => { runLock.ReleaseMutex(); runLock.Dispose(); };
 
         LoadJobs();
-        _ = LoadRecordsAsync();
+        Loaded += async (_, _) => { await LoadRecordsAsync(); await ScanAsync(); };
     }
 
     private void LoadJobs()
     {
+        selectedPath = (jobs.SelectedItem as JobRow)?.Path ?? selectedPath;
         var rows = journal.ReadJobs(pair.Id).Where(x => x.State != JobState.Completed).Select(x => new JobRow(
             x.Id,
             x.State switch { JobState.NeedsReconcile => "확인 필요", JobState.Pending => "대기", JobState.Running => "실행 중", _ => "적용됨" },
             x.Operation.Action.ToString(), x.Operation.Path,
             x.FailureReason is null ? x.Operation.Reason : $"[{x.FailureKind?.ToString() ?? "중단"}] {x.FailureReason} ({x.FailedAt})",
             x.Operation.Action == SyncAction.Conflict ? Copies(x) : "",
-            x.State == JobState.NeedsReconcile && x.Operation.Action == SyncAction.Conflict
+            x.State != JobState.Running
                 && x.Operation.ExpectedLocal?.Kind != EntryKind.Directory && x.Operation.ExpectedRemote?.Kind != EntryKind.Directory)).ToArray();
         jobs.ItemsSource = rows;
+        jobs.SelectedItem = rows.FirstOrDefault(x => x.Path == selectedPath) ?? rows.FirstOrDefault();
         UpdateJobButtons();
         if (rows.Length == 0) status.Text = "미해결 작업이 없습니다.";
-        else status.Text = $"미해결 작업 {rows.Length}개. 충돌 항목은 검사 후 어느 쪽을 남길지 선택하세요.";
+        else status.Text = $"미해결 작업 {rows.Length}개. 항목을 선택해 전송 방향을 지정하거나 이번 실행에서 제외하세요.";
     }
 
     private string Copies(JournalJob job)
@@ -137,7 +146,9 @@ public sealed class ResolveWindow : Window
     {
         var row = jobs.SelectedItem as JobRow;
         var ready = operation is null && row is { Resolvable: true } && localScan is not null && remoteScan is not null;
-        keepLocal.IsEnabled = ready; keepRemote.IsEnabled = ready;
+        keepLocal.IsEnabled = ready && localScan!.Entries.Any(x => x.Path == row!.Path && x.Kind == EntryKind.File);
+        keepRemote.IsEnabled = ready && remoteScan!.Entries.Any(x => x.Path == row!.Path && x.Kind == EntryKind.File);
+        skipOnce.IsEnabled = operation is null && row is not null && local is not null && remote is not null;
     }
 
     private void UpdateRecordButtons()
@@ -148,7 +159,7 @@ public sealed class ResolveWindow : Window
         detail.Text = row is null ? "" : row.Summary + "\n보관 경로: " + row.BackupPath;
     }
 
-    private void Start() { operation = new CancellationTokenSource(); scan.IsEnabled = reload.IsEnabled = false; keepLocal.IsEnabled = keepRemote.IsEnabled = restore.IsEnabled = acknowledge.IsEnabled = false; }
+    private void Start() { operation = new CancellationTokenSource(); scan.IsEnabled = reload.IsEnabled = false; skipOnce.IsEnabled = keepLocal.IsEnabled = keepRemote.IsEnabled = restore.IsEnabled = acknowledge.IsEnabled = false; }
     private void Finish() { operation?.Dispose(); operation = null; scan.IsEnabled = reload.IsEnabled = true; UpdateJobButtons(); UpdateRecordButtons(); }
 
     private async Task LoadRecordsAsync()
@@ -189,8 +200,15 @@ public sealed class ResolveWindow : Window
             if (!left.IsComplete) throw new InvalidOperationException("로컬 검사 실패: " + string.Join(" / ", left.Errors));
             var right = await remote.ScanAsync(ct);
             if (!right.IsComplete) throw new InvalidOperationException("원격 검사 실패: " + string.Join(" / ", right.Errors));
+            var previous = journal.ReadJobs(pair.Id).Where(x => x.State != JobState.Completed).Select(x => x.Operation.Path).Append(selectedPath).OfType<string>().Distinct().ToArray();
+            journal.CommitVerifiedPaths(pair.Id, left, right);
+            journal.RefreshPlan(pair.Id, SyncPlanner.Compare(left, right, journal.ReadBaseline(pair.Id)));
             localScan = left; remoteScan = right;
-            status.Text = "현재 상태를 확인했습니다. 충돌 항목을 선택하고 남길 쪽을 결정하세요.";
+            foreach (var path in previous)
+                if (!journal.ReadJobs(pair.Id).Any(x => x.State != JobState.Completed && x.Operation.Path == path))
+                    ResolvedPaths[path] = "재검사 완료";
+            LoadJobs();
+            status.Text = "현재 상태로 다시 판단했습니다. 같은 내용은 정리했습니다. 남은 항목은 전송 방향 또는 이번만 제외를 선택하세요.";
         }
         catch (OperationCanceledException) { status.Text = "검사를 중단했습니다."; }
         catch (Exception ex) { status.Text = "검사 실패: " + ex.Message; }
@@ -199,19 +217,35 @@ public sealed class ResolveWindow : Window
 
     private async Task ResolveAsync(bool preferLocal)
     {
-        if (jobs.SelectedItem is not JobRow row || localScan is null || remoteScan is null) return;
-        var side = preferLocal ? "로컬" : "원격";
-        if (MessageBox.Show(this, $"{row.Path}\n\n{side} 파일을 남기고 반대쪽에 반영합니다.\n두 버전의 보존 사본은 양쪽에 그대로 남습니다. 계속할까요?",
-            "충돌 해결", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+        if (jobs.SelectedItem is not JobRow row || local is null || remote is null) return;
+        var side = preferLocal ? "로컬 → 클라우드" : "클라우드 → 로컬";
+        if (MessageBox.Show(this, $"{row.Path}\n\n{side} 방향으로 현재 파일을 전송합니다. 기존 양쪽 내용은 사본으로 보존합니다.\n권한·버전·무결성 검사는 유지됩니다.",
+            "선택 파일 덮어쓰기", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
         Start();
         try
         {
-            var resolution = journal.ResolveConflict(pair.Id, row.Id, localScan, remoteScan, preferLocal);
-            status.Text = $"{row.Path}: {side} 우선으로 결정했습니다. 예정 작업 {resolution.Operation.Action}. 검사·실행 창에서 재개하세요.";
-            LoadJobs();
+            var message = await FileResolution.ApplyAsync(journal, pair.Id, row.Path, preferLocal, local, remote, operation!.Token, progress, control);
+            ResolvedPaths[row.Path] = "해결됨";
+            LoadJobs(); status.Text = row.Path + ": " + message;
         }
-        catch (Exception ex) { status.Text = "충돌 해결 실패: " + ex.Message; localScan = null; remoteScan = null; }
-        finally { await Task.CompletedTask; Finish(); }
+        catch (OperationCanceledException) { status.Text = "전송을 중단했습니다. 다시 검사하세요."; }
+        catch (Exception ex) { status.Text = "선택 파일 처리 실패: " + ex.Message; }
+        finally { localScan = null; remoteScan = null; Finish(); }
+    }
+    private async Task SkipOnceAsync()
+    {
+        if (jobs.SelectedItem is not JobRow row || local is null || remote is null) return;
+        Start();
+        try
+        {
+            control.SkipOnce(row.Path);
+            await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, operation!.Token, progress, control);
+            ResolvedPaths[row.Path] = "이번 실행 제외";
+            LoadJobs(); status.Text = row.Path + ": 이번 실행에서 제외하고 나머지 작업을 처리했습니다. 다음 검사에서는 다시 대상이 됩니다.";
+        }
+        catch (OperationCanceledException) { status.Text = "실행을 중단했습니다."; }
+        catch (Exception ex) { status.Text = "처리 실패: " + ex.Message; }
+        finally { localScan = null; remoteScan = null; Finish(); }
     }
 
     private async Task RestoreAsync()

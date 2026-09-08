@@ -33,14 +33,15 @@ public sealed class SyncExecutor(SyncJournal journal, RetryPolicy? retryPolicy =
 {
     private readonly RetryPolicy retry = retryPolicy ?? new RetryPolicy();
 
-    public async Task<ExecutionReport> RunAsync(Guid pair, ISyncEndpoint local, ISyncEndpoint remote, CancellationToken ct = default, IProgress<SyncProgress>? progress = null, TransferControl? control = null)
+    public async Task<ExecutionReport> RunAsync(Guid pair, ISyncEndpoint local, ISyncEndpoint remote, CancellationToken ct = default, IProgress<SyncProgress>? progress = null, TransferControl? control = null, string? onlyPath = null)
     {
+        using var controlRun = control?.BeginRun();
         var runId = Guid.NewGuid();
         void Report(SyncProgress value) => progress?.Report(value with { RunId = runId });
         var deferred = false;
         var issues = new System.Collections.Concurrent.ConcurrentBag<string>();
         var permanent = 0;
-        var queued = journal.ReadJobs(pair).Where(x => x.State is JobState.Pending or JobState.NeedsReconcile)
+        var queued = journal.ReadJobs(pair).Where(x => (x.State is JobState.Pending or JobState.NeedsReconcile) && (onlyPath is null || x.Operation.Path == onlyPath))
             .OrderBy(x => x.Operation.Action is SyncAction.DeleteLocal or SyncAction.DeleteRemote ? 1 : 0)
             .ThenBy(x => (x.Operation.Action is SyncAction.DeleteLocal or SyncAction.DeleteRemote ? -1 : 1) * x.Operation.Path.Count(c => c == '/')).ToArray();
         var total = queued.Length;
@@ -96,6 +97,7 @@ public sealed class SyncExecutor(SyncJournal journal, RetryPolicy? retryPolicy =
                     r = right.Entries.SingleOrDefault(x => x.Path == op.Path);
                 }
                 if (!plan.CanExecute) throw new SyncPreconditionException(string.Join(" / ", plan.Errors));
+                if (l == r && (l is null || l.Kind == EntryKind.Directory || l.ContentHash is not null)) return false;
                 if (op.Action != SyncAction.Conflict && OutcomeAlreadyPresent(op, l, r)) return false;
                 // Replanning protects directory deletion when a descendant changed after enqueue.
                 if (!plan.Operations.Any(x => x.Path == op.Path && x.Action == op.Action) || l != op.ExpectedLocal || r != op.ExpectedRemote)
@@ -309,7 +311,7 @@ public sealed class SyncExecutor(SyncJournal journal, RetryPolicy? retryPolicy =
         }
         public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct) => ReadAsync(buffer.AsMemory(offset, count), ct).AsTask();
     }
-    private static async Task PreserveConflict(JournalJob job, ISyncEndpoint local, ISyncEndpoint remote, CancellationToken ct)
+    public static async Task PreserveConflict(JournalJob job, ISyncEndpoint local, ISyncEndpoint remote, CancellationToken ct)
     {
         var op = job.Operation;
         if (op.ExpectedLocal?.Kind == EntryKind.Directory || op.ExpectedRemote?.Kind == EntryKind.Directory)
