@@ -77,10 +77,10 @@ public sealed partial class WebDavProvider : IProvider, IConfigurableProvider, I
             .OrderBy(x => x.ParentId is null ? 0 : 1).ThenBy(x => x.Name, StringComparer.OrdinalIgnoreCase).ToArray();
     }
     private sealed record DavItem(Uri Uri, string Name, bool IsFolder, bool IsSelf, string? ETag = null, long? Length = null);
-    private static async Task<IReadOnlyList<DavItem>> Query(HttpClient client, Uri scope, Uri target, CancellationToken ct)
+    private static async Task<IReadOnlyList<DavItem>> Query(HttpClient client, Uri scope, Uri target, CancellationToken ct, bool resourceOnly = false)
     {
         using var request = new HttpRequestMessage(new HttpMethod("PROPFIND"), target);
-        request.Headers.Add("Depth", "1");
+        request.Headers.Add("Depth", resourceOnly ? "0" : "1");
         request.Content = new StringContent("<d:propfind xmlns:d=\"DAV:\"><d:prop><d:resourcetype/><d:displayname/><d:getetag/><d:getcontentlength/></d:prop></d:propfind>", Encoding.UTF8, "application/xml");
         using var response = await client.SendAsync(request, HttpCompletionOption.ResponseContentRead, ct);
         if (response.StatusCode != HttpStatusCode.MultiStatus)
@@ -104,6 +104,7 @@ public sealed partial class WebDavProvider : IProvider, IConfigurableProvider, I
             var resource = Validate(scope, new Uri(target, href).AbsoluteUri);
             if (!seen.Add(resource.AbsoluteUri.TrimEnd('/'))) throw new WebDavException("중복된 원격 항목이 있습니다.");
             var self = resource.AbsolutePath.TrimEnd('/') == target.AbsolutePath.TrimEnd('/');
+            if (resourceOnly && !self) throw new WebDavException("단일 항목 조회에 다른 항목이 포함되었습니다.");
             var childPath = resource.AbsolutePath.TrimEnd('/');
             if (!self && childPath[..(childPath.LastIndexOf('/') + 1)] != target.AbsolutePath) throw new WebDavException("요청 범위 밖의 목록 항목입니다.");
             var itemStatus = entry.Element(dav + "status")?.Value;
@@ -113,7 +114,7 @@ public sealed partial class WebDavProvider : IProvider, IConfigurableProvider, I
             var types = props.Elements(dav + "resourcetype").ToArray();
             if (types.Length != 1) throw new WebDavException("원격 항목 유형을 확인하지 못했습니다.");
             var isFolder = types[0].Element(dav + "collection") is not null;
-            if (self) { if (!isFolder) throw new WebDavException("선택한 주소는 폴더가 아닙니다."); foundSelf = true; }
+            if (self) { if (!resourceOnly && !isFolder) throw new WebDavException("선택한 주소는 폴더가 아닙니다."); foundSelf = true; }
             var name = props.Elements(dav + "displayname").FirstOrDefault()?.Value;
             if (string.IsNullOrWhiteSpace(name)) name = Uri.UnescapeDataString(resource.AbsolutePath.TrimEnd('/').Split('/').Last());
             var etag = props.Elements(dav + "getetag").FirstOrDefault()?.Value?.Trim();

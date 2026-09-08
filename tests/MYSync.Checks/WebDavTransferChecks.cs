@@ -17,6 +17,12 @@ internal static class WebDavTransferChecks
         public bool WeakTags;
         public bool FailListing;
         public bool FailAfterMove;
+        public bool PropertyTags;
+        public bool OmitGetTag;
+        public bool ChangeBeforeConditionalGet;
+        public bool MismatchedGetTag;
+        public bool ExtraDepthZeroItem;
+        public int ConditionalGets;
         public int Moves;
         private int version;
         public Server() => Folder("/root");
@@ -28,6 +34,11 @@ internal static class WebDavTransferChecks
             ct.ThrowIfCancellationRequested();
             var path = Uri.UnescapeDataString(request.RequestUri!.AbsolutePath).TrimEnd('/');
             Files.TryGetValue(path, out var current);
+            if (request.Method == HttpMethod.Get && request.Headers.IfMatch.Count > 0)
+            {
+                ConditionalGets++;
+                if (ChangeBeforeConditionalGet) { ChangeBeforeConditionalGet = false; Seed(path, "concurrent-get-edit"); current = Files[path]; }
+            }
             if (request.Headers.IfMatch.Count > 0 && request.Headers.IfMatch.Single().ToString() != current?.Tag) return Reply(HttpStatusCode.PreconditionFailed);
             switch (request.Method.Method)
             {
@@ -35,15 +46,19 @@ internal static class WebDavTransferChecks
                     if (FailListing) return Reply(HttpStatusCode.Forbidden);
                     if (current is null) return Reply(HttpStatusCode.NotFound);
                     XNamespace d = "DAV:";
-                    var items = Files.Where(x => x.Key == path || x.Key.StartsWith(path + "/", StringComparison.Ordinal) && !x.Key[(path.Length + 1)..].Contains('/'));
+                    var depthZero = request.Headers.GetValues("Depth").Single() == "0";
+                    var items = Files.Where(x => x.Key == path || (!depthZero || ExtraDepthZeroItem) && x.Key.StartsWith(path + "/", StringComparison.Ordinal) && !x.Key[(path.Length + 1)..].Contains('/')).ToList();
+                    if (depthZero && ExtraDepthZeroItem) items.Add(new("/root/unrelated.txt", new(Encoding.UTF8.GetBytes("unrelated"), "\"other\"")));
                     var xml = new XElement(d + "multistatus", items.Select(x => new XElement(d + "response",
                         new XElement(d + "href", x.Key + (x.Value.Data is null ? "/" : "")),
-                        new XElement(d + "propstat", new XElement(d + "prop", new XElement(d + "resourcetype", x.Value.Data is null ? new XElement(d + "collection") : null)), new XElement(d + "status", "HTTP/1.1 200 OK")))));
+                        new XElement(d + "propstat", new XElement(d + "prop", new XElement(d + "resourcetype", x.Value.Data is null ? new XElement(d + "collection") : null),
+                            PropertyTags ? new XElement(d + "getetag", (WeakTags ? "W/" : "") + x.Value.Tag) : null), new XElement(d + "status", "HTTP/1.1 200 OK")))));
                     return new(HttpStatusCode.MultiStatus) { Content = new StringContent(xml.ToString()) };
                 case "GET":
                     if (current?.Data is null) return Reply(HttpStatusCode.NotFound);
                     var response = new HttpResponseMessage(HttpStatusCode.OK) { Content = new ByteArrayContent(current.Data) };
-                    response.Headers.ETag = EntityTagHeaderValue.Parse((WeakTags ? "W/" : "") + current.Tag); return response;
+                    if (!OmitGetTag) response.Headers.ETag = EntityTagHeaderValue.Parse(MismatchedGetTag ? "\"mismatch\"" : (WeakTags ? "W/" : "") + current.Tag);
+                    return response;
                 case "PUT":
                     if (request.Headers.IfNoneMatch.SingleOrDefault()?.ToString() != "*" || current is not null) return Reply(HttpStatusCode.PreconditionFailed);
                     Files[path] = new(await request.Content!.ReadAsByteArrayAsync(ct), $"\"{++version}\""); return Reply(HttpStatusCode.Created);
@@ -116,5 +131,47 @@ internal static class WebDavTransferChecks
         await executor.RunAsync(retryPair, source, remote);
         Check(server.Moves == moves && journal.ReadJobs(retryPair).Single().State == JobState.Applied, "uncertain upload replayed");
         Console.WriteLine("PASS: lost MOVE response reconciled without repeating upload");
+
+        // Synology-style response: getetag exists only in PROPFIND, not GET headers.
+        var propertyServer = new Server { PropertyTags = true, OmitGetTag = true };
+        using var propertyProvider = new WebDavProvider(() => propertyServer);
+        await propertyProvider.ConnectAsync(new Dictionary<string,string> { ["url"] = "https://dav.test/root/", ["username"] = "test", ["password"] = "test-only" }, default);
+        var propertyRemote = propertyProvider.OpenEndpoint("https://dav.test/root/");
+        await propertyRemote.PutFileAsync("file.txt", null, Data("first"), Hash("first"), default);
+        var first = (await propertyRemote.ScanAsync(default)).Entries.Single();
+        Check(first.ContentHash == Hash("first"), "property-only upload hash mismatch");
+        await propertyRemote.PutFileAsync("file.txt", first, Data("second"), Hash("second"), default);
+        var second = (await propertyRemote.ScanAsync(default)).Entries.Single();
+        Check(second.ContentHash == Hash("second") && propertyServer.ConditionalGets > 0, "property tag was not bound to downloaded bytes");
+
+        propertyServer.ChangeBeforeMove = true;
+        try { await propertyRemote.PutFileAsync("file.txt", second, Data("third"), Hash("third"), default); throw new Exception("property-only stale MOVE accepted"); }
+        catch (WebDavException ex) when (ex.Status == HttpStatusCode.PreconditionFailed) { }
+        Check(!propertyServer.Files.Keys.Any(x => x.Contains(".mysync-upload-", StringComparison.Ordinal)), "property-only verified temporary cleanup failed");
+        Check(Encoding.UTF8.GetString(propertyServer.Files["/root/file.txt"].Data!) == "external-edit", "property-only destination race lost data");
+        var external = (await propertyRemote.ScanAsync(default)).Entries.Single();
+        propertyServer.ChangeBeforeConditionalGet = true;
+        try { await propertyRemote.DeleteAsync(external, default); throw new Exception("metadata/GET race accepted"); }
+        catch (WebDavException ex) when (ex.Status == HttpStatusCode.PreconditionFailed) { }
+        Check(Encoding.UTF8.GetString(propertyServer.Files["/root/file.txt"].Data!) == "concurrent-get-edit", "GET race lost data");
+        var latest = (await propertyRemote.ScanAsync(default)).Entries.Single();
+        propertyServer.OmitGetTag = false; propertyServer.MismatchedGetTag = true;
+        try { await propertyRemote.DeleteAsync(latest, default); throw new Exception("inconsistent response tag accepted"); }
+        catch (SyncPreconditionException) { }
+        propertyServer.OmitGetTag = true; propertyServer.MismatchedGetTag = false;
+        propertyServer.ExtraDepthZeroItem = true;
+        try { await propertyRemote.DeleteAsync(latest, default); throw new Exception("extra Depth:0 resource accepted"); }
+        catch (WebDavException) { }
+        propertyServer.ExtraDepthZeroItem = false;
+        propertyServer.WeakTags = true;
+        try { await propertyRemote.DeleteAsync(latest, default); throw new Exception("weak property tag accepted"); }
+        catch (SyncPreconditionException) { }
+        propertyServer.PropertyTags = false;
+        try { await propertyRemote.DeleteAsync(latest, default); throw new Exception("missing tags accepted"); }
+        catch (SyncPreconditionException) { }
+        propertyServer.PropertyTags = true; propertyServer.WeakTags = false;
+        await propertyRemote.DeleteAsync(latest, default);
+        Check(!propertyServer.Files.ContainsKey("/root/file.txt"), "property-only delete failed");
+        Console.WriteLine("PASS: PROPFIND-only ETags support upload/replace/delete/cleanup; GET races, mismatched tags, extra resources and weak/missing tags rejected");
     }
 }

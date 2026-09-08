@@ -1,5 +1,13 @@
 # 개발 진행 상황
 
+## 2026-09-08 — PROPFIND ETag와 조건부 다운로드
+
+- 진단 기능 `3f50c3c` 커밋·푸시 후 WebDAV ETag 호환성 보완.
+- 단일 파일 PROPFIND Depth:0 및 속성 ETag를 사용하는 If-Match GET 구현. GET 헤더 누락 지원, 헤더 불일치·약한 값·조회 범위 오류 거부.
+- 속성 ETag가 있는 검증된 임시 파일 정리 지원 및 정리 결과 로그. ETag 없는 임시 파일은 보존 정책 유지.
+- 속성 ETag 전용 서버 모형의 전송·삭제·정리·동시 변경 검증 포함 전체 자동 검증 통과, 경고·오류 0개.
+- 실제 Synology와 기존 원격 파일은 변경하지 않았으며 실서버 재검증이 필요하다. 상세: [webdav-etag.md](webdav-etag.md).
+
 ## 2026-09-08 — 밀린 검증과 진단 기록
 
 - 미실행 상태였던 ManagementChecks·ResilienceChecks·UnsupportedChecks를 포함해 전체 자동 검증 실행.

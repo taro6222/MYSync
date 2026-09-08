@@ -88,6 +88,8 @@ win-x64/
 
 ## 문서
 
+- [WebDAV ETag 호환성 보완](docs/webdav-etag.md)
+
 - [실패 기록과 진단 로그](docs/diagnostics.md)
 
 - [개발 핸드오프](docs/HANDOFF.md): 현재 코드, 검증 범위, 다음 작업

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Net;
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using MYSync.Sync.Core;
 
@@ -47,11 +48,11 @@ public sealed partial class WebDavProvider
                     }
                     else
                     {
-                        var strong = item.ETag is { } declared && !declared.StartsWith("W/", StringComparison.Ordinal) ? declared : null;
+                        var strong = ValidStrongTag(item.ETag);
                         if (strong is not null && hashes.TryGetValue(item.Uri.AbsoluteUri, out var known)
                             && known.ETag == strong && (item.Length is null || item.Length == known.Length))
                         { entries.Add(new(path, EntryKind.File, known.Hash)); continue; }
-                        var (stream, hash, tag, length) = await Download(item.Uri, ct);
+                        var (stream, hash, tag, length) = await Download(item.Uri, ct, knownTag: strong);
                         await stream.DisposeAsync();
                         if (tag is not null) hashes[item.Uri.AbsoluteUri] = (tag, length, hash);
                         entries.Add(new(path, EntryKind.File, hash));
@@ -59,19 +60,29 @@ public sealed partial class WebDavProvider
                 }
             }
         }
-        private async Task<(FileStream Stream, string Hash, string? ETag, long Length)> Download(Uri uri, CancellationToken ct)
+        private async Task<(FileStream Stream, string Hash, string? ETag, long Length)> Download(Uri uri, CancellationToken ct, bool forMutation = false, string? knownTag = null)
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromMinutes(5));
+            if (forMutation)
+            {
+                var metadata = (await Query(http, scope, uri, timeout.Token, resourceOnly: true)).Single();
+                if (metadata.IsFolder) throw new SyncPreconditionException("예상 파일이 폴더로 변경되었습니다.");
+                knownTag = ValidStrongTag(metadata.ETag);
+                SyncDiagnostics.Write("webdav.resource-etag", "PROPFIND", hasStrongETag: knownTag is not null);
+            }
             using var request = new HttpRequestMessage(HttpMethod.Get, uri);
+            if (knownTag is not null) request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(knownTag));
             using var response = await http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token);
             if (response.StatusCode != HttpStatusCode.OK) throw Failure("다운로드", response.StatusCode);
+            var responseTag = response.Headers.ETag;
+            if (knownTag is not null && responseTag is not null && responseTag.ToString() != knownTag)
+                throw new SyncPreconditionException("조건부 다운로드의 ETag가 조회한 버전과 다릅니다.");
             var stream = Temp();
             try
             {
                 await response.Content.CopyToAsync(stream, timeout.Token); stream.Position = 0;
                 var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, timeout.Token)); stream.Position = 0;
-                var tag = response.Headers.ETag;
-                return (stream, hash, tag is { IsWeak: false } ? tag.ToString() : null, stream.Length);
+                return (stream, hash, knownTag ?? ValidStrongTag(responseTag?.ToString()), stream.Length);
             }
             catch { await stream.DisposeAsync(); throw; }
         }
@@ -91,10 +102,12 @@ public sealed partial class WebDavProvider
             _ when (int)status is >= 300 and < 400 => $"{action} 실패: 서버가 다른 주소로 이동을 요구했습니다 (HTTP {(int)status}). 최종 WebDAV 폴더 주소를 입력하세요.",
             _ => $"{action} 실패 (HTTP {(int)status}). 조건 불일치·권한·연결 상태를 확인하세요."
         }, status);
+        private static string? ValidStrongTag(string? value) =>
+            EntityTagHeaderValue.TryParse(value, out var tag) && !tag.IsWeak && tag.Tag != "*" && !tag.Tag.Contains(']') && !tag.Tag.Contains('[')
+                ? tag.ToString() : null;
         private static string StrongTag(string? tag)
         {
-            if (tag is null || tag.Contains(']') || tag.Contains('[')) throw new SyncPreconditionException("서버의 강한 ETag가 없어 조건부 변경을 수행할 수 없습니다.");
-            return tag;
+            return ValidStrongTag(tag) ?? throw new SyncPreconditionException("PROPFIND와 GET에서 유효한 강한 ETag를 얻지 못해 조건부 변경을 수행할 수 없습니다.");
         }
         public async Task<Stream> OpenReadAsync(SyncEntry expected, CancellationToken ct)
         {
@@ -109,7 +122,7 @@ public sealed partial class WebDavProvider
             if (expected is not null)
             {
                 if (expected.Path != path || expected.Kind != EntryKind.File) throw new SyncPreconditionException("예상 파일 정보가 올바르지 않습니다.");
-                var (old, hash, tag, _) = await Download(destination, ct); await old.DisposeAsync();
+                var (old, hash, tag, _) = await Download(destination, ct, forMutation: true); await old.DisposeAsync();
                 if (hash != expected.ContentHash) throw new SyncPreconditionException("업로드 대상이 변경되었습니다.");
                 destinationTag = StrongTag(tag);
             }
@@ -126,7 +139,7 @@ public sealed partial class WebDavProvider
                     using var response = await http.SendAsync(put, ct);
                     if (response.StatusCode != HttpStatusCode.Created) throw Failure("임시 업로드", response.StatusCode);
                 }
-                var (check, uploadedHash, tag, _) = await Download(temporary, ct); await check.DisposeAsync();
+                var (check, uploadedHash, tag, _) = await Download(temporary, ct, forMutation: true); await check.DisposeAsync();
                 if (uploadedHash != sha256) throw new SyncPreconditionException("서버에 저장된 업로드 내용이 다릅니다.");
                 stagingTag = StrongTag(tag);
                 using var move = new HttpRequestMessage(new HttpMethod("MOVE"), temporary);
@@ -148,7 +161,9 @@ public sealed partial class WebDavProvider
                     {
                         using var cleanup = new HttpRequestMessage(HttpMethod.Delete, temporary); cleanup.Headers.TryAddWithoutValidation("If-Match", stagingTag);
                         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                        using var ignored = await http.SendAsync(cleanup, timeout.Token);
+                        using var cleaned = await http.SendAsync(cleanup, timeout.Token);
+                        SyncDiagnostics.Write(cleaned.StatusCode is HttpStatusCode.NoContent or HttpStatusCode.NotFound ? "webdav.staging-cleaned" : "webdav.staging-cleanup-refused",
+                            "DELETE", (int)cleaned.StatusCode);
                     }
                     catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException) { }
                 }
@@ -165,7 +180,7 @@ public sealed partial class WebDavProvider
         public async Task DeleteAsync(SyncEntry expected, CancellationToken ct)
         {
             if (expected.Kind == EntryKind.Directory) throw new SyncPreconditionException("WebDAV 폴더 삭제는 하위 변경 보호 구현 전까지 중단합니다.");
-            var target = Resolve(expected.Path); var (stream, hash, tag, _) = await Download(target, ct); await stream.DisposeAsync();
+            var target = Resolve(expected.Path); var (stream, hash, tag, _) = await Download(target, ct, forMutation: true); await stream.DisposeAsync();
             if (hash != expected.ContentHash) throw new SyncPreconditionException("삭제 대상이 변경되었습니다.");
             using var request = new HttpRequestMessage(HttpMethod.Delete, target); request.Headers.TryAddWithoutValidation("If-Match", StrongTag(tag));
             using var response = await http.SendAsync(request, ct);

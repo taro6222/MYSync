@@ -43,6 +43,8 @@
 
 ## 현재 제한
 
+ETag 재테스트: 새 테스트 폴더에서 최초 업로드·교체·삭제를 수행하고 로그의 `webdav.resource-etag`와 `webdav.response`를 비교하세요. GET 헤더 ETag가 없어도 PROPFIND에 강한 ETag가 있으면 전송할 수 있습니다. 실제 Synology 검증은 아직 남아 있으며, 이전 잔류 `.mysync-upload-` 파일을 자동으로 정리하지 않습니다.
+
 - 수동 실행은 실제 파일을 추가·수정·삭제합니다. 작업 목록의 DeleteLocal·DeleteRemote는 삭제 전파입니다. 먼저 별도의 테스트 폴더에서 확인하세요.
 - 계정은 현재 Windows 사용자에 묶어 암호화합니다. 다른 사용자·PC로 DB를 복사하면 복호화하지 못할 수 있습니다. 자동 접속 대신 저장 계정 연결 버튼을 사용합니다.
 - WebDAV는 HTTPS + Basic 인증만 지원합니다. 자동 리디렉션을 따라가지 않으므로 최종 WebDAV 폴더 URL을 입력해야 합니다.
