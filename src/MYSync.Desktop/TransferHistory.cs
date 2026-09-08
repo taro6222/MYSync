@@ -17,7 +17,9 @@ public sealed class TransferHistory
             var row = Rows.FirstOrDefault(x => x.ActivityId == report.ActivityId);
             if (row is null) { row = new(pairId, name, report); Rows.Insert(0, row); }
             if (report.Event == TransferEvent.Started) Rows.Move(Rows.IndexOf(row), 0);
+            var wasDone = row.Done;
             SessionBytes += row.Apply(report);
+            if (!wasDone && report.Event == TransferEvent.Completed && row.IsFile) CompletedFiles++;
         }
         else if (report.Event == TransferEvent.Held)
         {

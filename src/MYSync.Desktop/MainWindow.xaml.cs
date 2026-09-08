@@ -316,10 +316,11 @@ public partial class MainWindow : Window
                     remote = new PolicyEndpoint(transfer.OpenEndpoint(pair.RemoteFolderId), policy);
                 }
                 var left = await local.ScanAsync(ct); var right = await remote.ScanAsync(ct);
+                if (left.IsComplete && right.IsComplete) journal.CommitVerifiedPaths(pair.Id, left, right);
                 var plan = SyncPlanner.Compare(left, right, journal.ReadBaseline(pair.Id));
                 if (!plan.CanExecute)
                 { progress.Report(new SyncProgress(SyncPhase.Attention, string.Join(" / ", plan.Errors))); return new ExecutionReport(false, plan.Errors); }
-                if (journal.ReadJobs(pair.Id).All(x => x.State == JobState.Completed)) journal.Enqueue(pair.Id, plan);
+                journal.RefreshPlan(pair.Id, plan);
                 return await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, ct, progress, fileControl);
             });
             var run = new AutoRun(monitor, session, runLock);

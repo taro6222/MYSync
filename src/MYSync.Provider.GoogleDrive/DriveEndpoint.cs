@@ -16,12 +16,12 @@ public sealed partial class GoogleDriveProvider
             throw new ArgumentException("Google 폴더 ID가 올바르지 않습니다.");
         return new DriveEndpoint(http, session, remoteFolderId);
     }
-    private sealed class DriveEndpoint(HttpClient client, IGoogleSession account, string root) : ISyncEndpoint, ISyncPolicyEndpoint
+    private sealed class DriveEndpoint(HttpClient client, IGoogleSession account, string root) : ISyncEndpoint, ISyncPolicyEndpoint, IFileStateEndpoint
     {
         public SyncPolicy Policy { get; set; } = new();
         private const long MultipartThreshold = 5 * 1024 * 1024;
-        private const string Fields = "id,name,mimeType,parents,trashed,driveId,version,size";
-        private sealed record Item(string Id, string Name, string Mime, string[] Parents, string Version, long Size, bool Trashed, bool Shared, string? Tag = null)
+        private const string Fields = "id,name,mimeType,parents,trashed,driveId,version,size,sha256Checksum";
+        private sealed record Item(string Id, string Name, string Mime, string[] Parents, string Version, long Size, bool Trashed, bool Shared, string? Tag = null, string? Sha256 = null, bool LegacyTag = false)
         { public bool Folder => Mime == FolderType; }
         private static FileStream Temp() => new(Path.Combine(Path.GetTempPath(), "mysync-drive-" + Guid.NewGuid().ToString("N")), FileMode.CreateNew,
             FileAccess.ReadWrite, FileShare.None, 65536, FileOptions.Asynchronous | FileOptions.DeleteOnClose);
@@ -32,7 +32,7 @@ public sealed partial class GoogleDriveProvider
             item.TryGetProperty("parents", out var parents) ? parents.EnumerateArray().Select(x => x.GetString()!).ToArray() : [],
             item.GetProperty("version").GetString() ?? throw new InvalidDataException("Google 버전 누락"),
             item.TryGetProperty("size", out var size) && long.TryParse(size.GetString(), out var length) ? length : 0,
-            item.TryGetProperty("trashed", out var trash) && trash.GetBoolean(), item.TryGetProperty("driveId", out _), tag));
+            item.TryGetProperty("trashed", out var trash) && trash.GetBoolean(), item.TryGetProperty("driveId", out _), tag, item.TryGetProperty("sha256Checksum", out var checksum) ? checksum.GetString()?.ToUpperInvariant() : null));
         private static Item Valid(Item item)
         {
             if (string.IsNullOrWhiteSpace(item.Id) || string.IsNullOrWhiteSpace(item.Name) || !ulong.TryParse(item.Version, out _) || item.Size < 0)
@@ -118,9 +118,20 @@ public sealed partial class GoogleDriveProvider
                     if (group.Count() > 1) { notices.Add(new(path, "같은 이름의 Google 항목이 여러 개입니다.")); continue; }
                     if (Unsupported(item) is { } why) { notices.Add(new(path, why)); continue; }
                     if (item.Folder) { entries.Add(new(path, EntryKind.Directory, null)); await Visit(item.Id, path + "/", depth + 1); }
-                    else { var (stream, hash) = await Download(item, ct); await stream.DisposeAsync(); entries.Add(new(path, EntryKind.File, hash)); }
+                    else if (item.Sha256 is { Length: 64 } hash && hash.All(Uri.IsHexDigit)) entries.Add(new(path, EntryKind.File, hash));
+                    else { var (stream, downloadedHash) = await Download(item, ct); await stream.DisposeAsync(); entries.Add(new(path, EntryKind.File, downloadedHash)); }
                 }
             }
+        }
+        public bool SupportsConcurrentFiles => true;
+        public async Task<SyncEntry?> InspectFileAsync(string path, CancellationToken ct)
+        {
+            var (_, item) = await Resolve(path, ct);
+            if (item is null) return null;
+            if (item.Folder) return new(path, EntryKind.Directory, null);
+            var (stream, hash) = await Download(item, ct);
+            await stream.DisposeAsync();
+            return new(path, EntryKind.File, hash);
         }
         private static string[] Parts(string path)
         {
@@ -182,7 +193,22 @@ public sealed partial class GoogleDriveProvider
             var (stream, hash) = await Download(item, ct); await stream.DisposeAsync();
             var current = await Metadata(item.Id, ct);
             if (hash != expected.ContentHash || !Same(item, current)) throw new SyncPreconditionException("Google 대상 내용이 변경되었습니다.");
-            if (current.Tag is null) throw new SyncPreconditionException("Google 응답에 강한 ETag가 없어 안전한 교체·휴지통 이동을 중단합니다.");
+            if (current.Tag is null)
+            {
+                // Drive v3 commonly omits ETag. v2 exposes the resource ETag in its JSON.
+                // Match the same file version before using it with a v2 conditional mutation.
+                using var request = new HttpRequestMessage(HttpMethod.Get, "https://www.googleapis.com/drive/v2/files/" + Uri.EscapeDataString(item.Id) + "?fields=id,version,etag");
+                using var response = await Send(request, ct);
+                using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+                var value = doc.RootElement;
+                var tag = value.TryGetProperty("etag", out var etag) ? etag.GetString() : null;
+                if (!value.TryGetProperty("id", out var id) || id.GetString() != item.Id ||
+                    !value.TryGetProperty("version", out var version) || version.GetString() != current.Version ||
+                    !EntityTagHeaderValue.TryParse(tag, out var parsed) || parsed.IsWeak || parsed.Tag == "*" ||
+                    !Same(current, await Metadata(item.Id, ct)))
+                    throw new SyncPreconditionException("Google 파일 버전 또는 조건부 변경 정보를 확인할 수 없습니다. 다시 검사합니다.");
+                current = current with { Tag = parsed.ToString(), LegacyTag = true };
+            }
             return current;
         }
         private async Task<string> GenerateId(CancellationToken ct)
@@ -209,8 +235,8 @@ public sealed partial class GoogleDriveProvider
             using var body = new MultipartContent("related");
             body.Add(new StringContent(JsonSerializer.Serialize(existing is null ? new { id, name = Parts(path)[^1], parents = new[] { parent.Id } } : (object)new { }), Encoding.UTF8, "application/json"));
             var media = new StreamContent(data); media.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream"); body.Add(media);
-            using var request = new HttpRequestMessage(existing is null ? HttpMethod.Post : HttpMethod.Patch,
-                "https://www.googleapis.com/upload/drive/v3/files" + (existing is null ? "" : "/" + Uri.EscapeDataString(id)) + "?uploadType=multipart&fields=id");
+            using var request = new HttpRequestMessage(existing is null ? HttpMethod.Post : existing.LegacyTag ? HttpMethod.Put : HttpMethod.Patch,
+                "https://www.googleapis.com/upload/drive/" + (existing?.LegacyTag == true ? "v2" : "v3") + "/files" + (existing is null ? "" : "/" + Uri.EscapeDataString(id)) + "?uploadType=multipart&fields=id");
             request.Content = Policy.Bandwidth.Limit(body);
             request.Options.Set(RequestTimeoutHandler.Budget, Policy.Bandwidth.TimeoutFor(data.Length + 4096));
             if (existing is not null) request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(existing.Tag!));
@@ -223,8 +249,8 @@ public sealed partial class GoogleDriveProvider
         }
         private async Task UploadChunks(FileStream data, Item parent, Item? existing, string id, string path, CancellationToken ct)
         {
-            using var initiate = new HttpRequestMessage(existing is null ? HttpMethod.Post : HttpMethod.Patch,
-                "https://www.googleapis.com/upload/drive/v3/files" + (existing is null ? "" : "/" + Uri.EscapeDataString(id)) + "?uploadType=resumable");
+            using var initiate = new HttpRequestMessage(existing is null ? HttpMethod.Post : existing.LegacyTag ? HttpMethod.Put : HttpMethod.Patch,
+                "https://www.googleapis.com/upload/drive/" + (existing?.LegacyTag == true ? "v2" : "v3") + "/files" + (existing is null ? "" : "/" + Uri.EscapeDataString(id)) + "?uploadType=resumable");
             initiate.Content = new StringContent(JsonSerializer.Serialize(existing is null ? new { id, name = Parts(path)[^1], parents = new[] { parent.Id } } : (object)new { }), Encoding.UTF8, "application/json");
             initiate.Headers.TryAddWithoutValidation("X-Upload-Content-Type", "application/octet-stream");
             initiate.Headers.TryAddWithoutValidation("X-Upload-Content-Length", data.Length.ToString(System.Globalization.CultureInfo.InvariantCulture));
@@ -232,7 +258,7 @@ public sealed partial class GoogleDriveProvider
             using var start = await Send(initiate, ct);
             var location = start.Headers.Location;
             if (location is null || !location.IsAbsoluteUri || location.Scheme != "https" || location.Host != "www.googleapis.com" ||
-                location.Port != 443 || location.UserInfo.Length != 0 || !location.AbsolutePath.StartsWith("/upload/drive/v3/files", StringComparison.Ordinal))
+                location.Port != 443 || location.UserInfo.Length != 0 || !(location.AbsolutePath.StartsWith("/upload/drive/v3/files", StringComparison.Ordinal) || location.AbsolutePath.StartsWith("/upload/drive/v2/files", StringComparison.Ordinal)))
                 throw new SyncPreconditionException("Google 업로드 세션 주소가 올바르지 않습니다.");
             var buffer = new byte[8 * 1024 * 1024];
             long offset = 0;
@@ -274,8 +300,8 @@ public sealed partial class GoogleDriveProvider
             if (expected.Kind == EntryKind.Directory) throw new SyncPreconditionException("Google 폴더 삭제는 하위 변경 보호 구현 전까지 중단합니다.");
             var (_, found) = await Resolve(expected.Path, ct); if (found is null) throw new SyncPreconditionException("Google 파일이 없습니다.");
             var verified = await Verify(found, expected, ct);
-            using var request = new HttpRequestMessage(HttpMethod.Patch, "https://www.googleapis.com/drive/v3/files/" + Uri.EscapeDataString(found.Id) + "?fields=id,trashed")
-            { Content = new StringContent("{\"trashed\":true}", Encoding.UTF8, "application/json") };
+            using var request = new HttpRequestMessage(HttpMethod.Patch, "https://www.googleapis.com/drive/" + (verified.LegacyTag ? "v2" : "v3") + "/files/" + Uri.EscapeDataString(found.Id) + "?fields=id")
+            { Content = new StringContent(verified.LegacyTag ? "{\"labels\":{\"trashed\":true}}" : "{\"trashed\":true}", Encoding.UTF8, "application/json") };
             request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(verified.Tag!));
             using var response = await Send(request, ct);
             if ((await Resolve(expected.Path, ct)).Existing is not null) throw new SyncPreconditionException("Google 휴지통 이동 결과를 재확인하세요.");

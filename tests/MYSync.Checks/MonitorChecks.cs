@@ -60,7 +60,7 @@ internal static class MonitorChecks
             faultMonitor.StatusChanged += status => { if (status.State == MonitorState.NeedsAttention) attention.TrySetResult(); };
             faultMonitor.Start(); await attention.Task.WaitAsync(TimeSpan.FromSeconds(5)); faultMonitor.RequestScan();
             await Task.Delay(100);
-            Check(faultCalls == 1 && !faultMonitor.Completion.IsCompleted, "attention must keep the monitor enabled without repeating unsafe work");
+            Check(faultCalls >= 2 && !faultMonitor.Completion.IsCompleted, "attention must keep scanning so unrelated changes are not blocked");
         }
         var running = Signal(); var cancelled = false;
         var cancellable = new SyncMonitor(root, async ct =>
@@ -72,6 +72,6 @@ internal static class MonitorChecks
         }, settle: TimeSpan.Zero);
         cancellable.Start(); await running.Task.WaitAsync(TimeSpan.FromSeconds(5)); await cancellable.DisposeAsync();
         Check(cancelled && cancellable.Completion.IsCompleted, "running cycle not cancelled");
-        Console.WriteLine("PASS: unresolved conflict keeps monitor enabled in attention state without repeating writes; pause cancels active cycle");
+        Console.WriteLine("PASS: unresolved items keep monitor enabled and allow subsequent scans; pause cancels active cycle");
     }
 }

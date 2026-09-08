@@ -95,8 +95,10 @@ public sealed class SyncRunWindow : Window
             journal.SkipExcluded(pair.Id, policy.Exclusions);
             local = new PolicyEndpoint(new LocalEndpoint(pair.LocalPath, recovery), policy); remote = new PolicyEndpoint(transfer.OpenEndpoint(pair.RemoteFolderId), policy);
             var left = await local.ScanAsync(ct); var right = await remote.ScanAsync(ct);
+            if (left.IsComplete && right.IsComplete) journal.CommitVerifiedPaths(pair.Id, left, right);
             plan = SyncPlanner.Compare(left, right, journal.ReadBaseline(pair.Id));
             if (!plan.CanExecute) throw new InvalidOperationException(string.Join(" / ", plan.Errors));
+            journal.RefreshPlan(pair.Id, plan);
             var existing = journal.ReadJobs(pair.Id).Where(x => x.State != JobState.Completed).ToArray(); resume = existing.Length > 0;
             grid.ItemsSource = resume ? existing.Select(x => x.FailureReason is null ? x.Operation :
                 x.Operation with { Reason = $"[{x.FailureKind?.ToString() ?? "중단"}] {x.FailureReason} ({x.FailedAt})" }).ToArray() : plan.Operations;

@@ -139,7 +139,7 @@ internal static class WebDavTransferChecks
         server.FailAfterMove = true;
         await executor.RunAsync(retryPair, source, remote); var moves = server.Moves;
         await executor.RunAsync(retryPair, source, remote);
-        Check(server.Moves == moves && journal.ReadJobs(retryPair).Single().State == JobState.Applied, "uncertain upload replayed");
+        Check(server.Moves == moves && journal.ReadJobs(retryPair).Single().State == JobState.Completed, "uncertain upload replayed");
         Console.WriteLine("PASS: lost MOVE response reconciled without repeating upload");
 
         // Synology-style response: getetag exists only in PROPFIND, not GET headers.

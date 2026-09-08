@@ -53,6 +53,7 @@ public sealed class TransferRow(Guid pairId, string name, SyncProgress initial) 
         if (report.Event == TransferEvent.Held) Finish(report.Message);
         if (report.Event == TransferEvent.Started) clock.Restart();
         if (report.Event == TransferEvent.Applied) Applied = true;
+        if (report.Event == TransferEvent.Completed) Finish("완료");
         if (report.Event == TransferEvent.Retrying) State = "재시도 대기";
         if (report.Event is TransferEvent.Failed or TransferEvent.Cancelled)
             Finish(report.Event == TransferEvent.Cancelled ? "중단" : "확인 필요");

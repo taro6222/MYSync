@@ -56,4 +56,5 @@ if (File.Exists(Path.Combine(root, ".tools", "google", "oauth-client.json")))
     Console.WriteLine("PASS: embedded Google OAuth configuration loads without a plugin-side JSON");
 }
 await TransferControlChecks.Run(scratch);
+await ConcurrentChecks.Run(scratch);
 Console.WriteLine("All checks passed.");

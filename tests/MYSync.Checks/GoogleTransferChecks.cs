@@ -18,24 +18,27 @@ internal static class GoogleTransferChecks
     private sealed record Resource(string Id, string Name, string Parent, string Mime, byte[] Data, int Version, bool Trashed = false);
     private sealed class Server : HttpMessageHandler
     {
-        public readonly Dictionary<string, Resource> Items = [];
-        public int Writes, Trashes;
-        public bool Race, LoseResponse, NoTag, Incomplete;
+        public readonly System.Collections.Concurrent.ConcurrentDictionary<string, Resource> Items = new();
+        public int Writes, Trashes, MediaReads;
+        public bool Checksums;
+        public bool Race, LoseResponse, NoTag, NoV2Tag, Incomplete;
         private int ids = 10;
         private readonly Dictionary<string, (Resource Item, MemoryStream Data, long Size)> uploads = [];
-        public int Chunks;
+        public int Chunks, LegacyUploads;
+        private static void CheckLegacyMethod(HttpRequestMessage request)
+        { if (request.Method != HttpMethod.Put) throw new Exception("v2 upload must use PUT"); }
         public Server() => Items["root"] = new("root", "내 드라이브", "", Folder, [], 1);
         public void Seed(string id, string name, string parent, string content, string mime = "application/octet-stream") =>
             Items[id] = new(id, name, parent, mime, Encoding.UTF8.GetBytes(content), Items.TryGetValue(id, out var old) ? old.Version + 1 : 1);
-        private static object Model(Resource r) => new { id = r.Id, name = r.Name, parents = r.Parent == "" ? Array.Empty<string>() : new[] { r.Parent }, mimeType = r.Mime,
-            version = r.Version.ToString(), size = r.Data.Length.ToString(), trashed = r.Trashed };
+        private object Model(Resource r) => new { id = r.Id, name = r.Name, parents = r.Parent == "" ? Array.Empty<string>() : new[] { r.Parent }, mimeType = r.Mime,
+            version = r.Version.ToString(), size = r.Data.Length.ToString(), trashed = r.Trashed, sha256Checksum = Checksums ? Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(r.Data)) : null };
         private static HttpResponseMessage Json(object data) => new(HttpStatusCode.OK) { Content = new StringContent(JsonSerializer.Serialize(data)) };
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             ct.ThrowIfCancellationRequested();
             if (request.RequestUri!.Host != "www.googleapis.com" || request.Headers.Authorization?.Parameter != "test-token") throw new Exception("bad Google request origin/auth");
             var path = request.RequestUri.AbsolutePath; var query = Uri.UnescapeDataString(request.RequestUri.Query);
-            if (path.EndsWith("/generateIds")) return Json(new { ids = new[] { "generated" + ++ids } });
+            if (path.EndsWith("/generateIds")) return Json(new { ids = new[] { "generated" + Interlocked.Increment(ref ids) } });
             if (request.Method == HttpMethod.Get && path.EndsWith("/files"))
             {
                 var start = query.IndexOf("q='") + 3; var end = query.IndexOf("' in parents", start); var parent = query[start..end];
@@ -45,12 +48,13 @@ internal static class GoogleTransferChecks
             {
                 using var doc = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
                 var create = request.Method == HttpMethod.Post;
+                if (path.Contains("/v2/")) { CheckLegacyMethod(request); LegacyUploads++; }
                 var uploadId = create ? doc.RootElement.GetProperty("id").GetString()! : path.Split('/').Last();
                 var resource = create ? new Resource(uploadId, doc.RootElement.GetProperty("name").GetString()!, doc.RootElement.GetProperty("parents")[0].GetString()!, "application/octet-stream", [], 0) : Items[uploadId];
                 if (!create && request.Headers.IfMatch.SingleOrDefault()?.ToString() != $"\"v{resource.Version}\"") return new(HttpStatusCode.PreconditionFailed);
                 uploads[uploadId] = (resource, new MemoryStream(), long.Parse(request.Headers.GetValues("X-Upload-Content-Length").Single()));
                 var response = new HttpResponseMessage(HttpStatusCode.OK);
-                response.Headers.Location = new Uri("https://www.googleapis.com/upload/drive/v3/files?upload_id=" + uploadId);
+                response.Headers.Location = new Uri("https://www.googleapis.com/upload/drive/" + (path.Contains("/v2/") ? "v2" : "v3") + "/files?upload_id=" + uploadId);
                 return response;
             }
             if (request.Method == HttpMethod.Put && query.StartsWith("?upload_id="))
@@ -71,14 +75,15 @@ internal static class GoogleTransferChecks
             if (request.Method == HttpMethod.Get)
             {
                 if (current is null) return new(HttpStatusCode.NotFound);
-                if (query.Contains("alt=media")) return new(HttpStatusCode.OK) { Content = new ByteArrayContent(current.Data) };
+                if (query.Contains("alt=media")) { MediaReads++; return new(HttpStatusCode.OK) { Content = new ByteArrayContent(current.Data) }; }
+                if (path.Contains("/v2/")) return Json(new { id = current.Id, version = current.Version.ToString(), etag = NoV2Tag ? null : $"\"v{current.Version}\"" });
                 var result = Json(Model(current));
                 if (!NoTag) result.Headers.ETag = new EntityTagHeaderValue($"\"v{current.Version}\"");
                 return result;
             }
-            if (Race && current is not null && request.Method == HttpMethod.Patch)
+            if (Race && current is not null && (request.Method == HttpMethod.Patch || request.Method == HttpMethod.Put))
             { Race = false; Seed(id, current.Name, current.Parent, "external-change"); current = Items[id]; }
-            if (request.Method == HttpMethod.Patch && request.Headers.IfMatch.SingleOrDefault()?.ToString() != $"\"v{current?.Version}\"") return new(HttpStatusCode.PreconditionFailed);
+            if ((request.Method == HttpMethod.Patch || request.Method == HttpMethod.Put) && request.Headers.IfMatch.SingleOrDefault()?.ToString() != $"\"v{current?.Version}\"") return new(HttpStatusCode.PreconditionFailed);
             if (request.Content is MultipartContent multipart)
             {
                 var parts = multipart.ToArray(); using var metadata = JsonDocument.Parse(await parts[0].ReadAsStringAsync(ct));
@@ -101,7 +106,7 @@ internal static class GoogleTransferChecks
                 Items[id] = new(id, value.GetProperty("name").GetString()!, value.GetProperty("parents")[0].GetString()!, Folder, [], 1);
                 return Json(new { id });
             }
-            if (request.Method == HttpMethod.Patch && current is not null && json.RootElement.GetProperty("trashed").GetBoolean())
+            if (request.Method == HttpMethod.Patch && current is not null && (path.Contains("/v2/") ? json.RootElement.GetProperty("labels") : json.RootElement).GetProperty("trashed").GetBoolean())
             { Items[id] = current with { Trashed = true, Version = current.Version + 1 }; Trashes++; return Json(new { id, trashed = true }); }
             throw new Exception("unexpected Google request");
         }
@@ -126,7 +131,12 @@ internal static class GoogleTransferChecks
         await remote.ScanAsync(default);
         Check(timer.Elapsed >= TimeSpan.FromMilliseconds(450), "Google HTTP download bypassed bandwidth limit");
         ((ISyncPolicyEndpoint)remote).Policy = new();
-        server.Items.Remove("excluded");
+        server.Items.TryRemove("excluded", out _);
+        server.Checksums = true; var mediaReads = server.MediaReads;
+        var metadataScan = await remote.ScanAsync(default);
+        Check(metadataScan.IsComplete && metadataScan.Entries.Single(x => x.Path == "cloud.txt").ContentHash == Hash("cloud") &&
+            server.MediaReads == mediaReads, "server SHA256 scan downloaded unchanged content");
+        server.Checksums = false;
         var area = Path.Combine(scratch, "google-transfer"); var localRoot = Path.Combine(area, "local"); Directory.CreateDirectory(Path.Combine(localRoot, "한글"));
         await File.WriteAllTextAsync(Path.Combine(localRoot, "한글", "local.txt"), "local");
         var local = new LocalEndpoint(localRoot, Path.Combine(area, "recovery")); var pair = Guid.NewGuid();
@@ -148,7 +158,18 @@ internal static class GoogleTransferChecks
         await Reject(() => remote.PutFileAsync("cloud.txt", expected, Data("replacement"), Hash("replacement"), default));
         Check(Encoding.UTF8.GetString(server.Items["cloud"].Data) == "external-change", "Google concurrent content overwritten");
         expected = (await remote.ScanAsync(default)).Entries.Single(x => x.Path == "cloud.txt");
-        server.NoTag = true; await Reject(() => remote.DeleteAsync(expected, default)); server.NoTag = false;
+        server.NoTag = true;
+        await remote.PutFileAsync("cloud.txt", expected, Data("v2-replacement"), Hash("v2-replacement"), default);
+        Check(Encoding.UTF8.GetString(server.Items["cloud"].Data) == "v2-replacement", "v3 missing ETag did not use v2 conditional overwrite");
+        expected = (await remote.ScanAsync(default)).Entries.Single(x => x.Path == "cloud.txt");
+        server.Race = true;
+        await Reject(() => remote.PutFileAsync("cloud.txt", expected, Data("race"), Hash("race"), default));
+        Check(Encoding.UTF8.GetString(server.Items["cloud"].Data) == "external-change", "v2 conditional race lost external edit");
+        expected = (await remote.ScanAsync(default)).Entries.Single(x => x.Path == "cloud.txt");
+        server.NoV2Tag = true; await Reject(() => remote.DeleteAsync(expected, default)); server.NoV2Tag = false;
+        await remote.DeleteAsync(expected, default);
+        Check(server.Items["cloud"].Trashed, "v2 conditional trash failed");
+        server.NoTag = false;
         await Reject(() => remote.DeleteAsync(new("한글", EntryKind.Directory, null), default));
         server.Seed("doc", "문서", "root", "", "application/vnd.google-apps.document");
         server.Seed("dupe1", "duplicate", "root", "one"); server.Seed("dupe2", "duplicate", "root", "two");
@@ -161,6 +182,10 @@ internal static class GoogleTransferChecks
         var bigEntry = (await remote.ScanAsync(default)).Entries.Single(x => x.Path == "big.dat");
         await using (var bigRead = await remote.OpenReadAsync(bigEntry, default))
             Check(bigRead.Length == bigPayload.Length, "large download truncated");
+        server.NoTag = true;
+        await remote.PutFileAsync("big.dat", bigEntry, Data(bigPayload + "updated"), Hash(bigPayload + "updated"), default);
+        Check(server.LegacyUploads == 1 && server.Chunks == 4, "large no-ETag overwrite did not use v2 resumable update");
+        server.NoTag = false;
         var writes = server.Writes; using var large = new MemoryStream(new byte[5 * 1024 * 1024 + 1]);
         await Reject(() => remote.PutFileAsync("large.bin", null, large, "unused", default)); Check(server.Writes == writes, "oversized upload mutated server");
 
@@ -168,7 +193,7 @@ internal static class GoogleTransferChecks
         var retryPair = Guid.NewGuid(); journal.Enqueue(retryPair, new([new("lost.txt", SyncAction.Upload, entry, null, "test")], []));
         server.LoseResponse = true; writes = server.Writes;
         await executor.RunAsync(retryPair, source, remote);
-        Check(server.Writes == writes + 1 && journal.ReadJobs(retryPair).Single().State == JobState.Applied, "Google response loss repeated upload");
-        Console.WriteLine("PASS: Google recursive disk roundtrip/update/trash, ETag race and missing-tag protection, unsupported/duplicates, incomplete scans, size limit and response-loss reconciliation");
+        Check(server.Writes == writes + 1 && journal.ReadJobs(retryPair).Single().State == JobState.Completed, "Google response loss repeated upload");
+        Console.WriteLine("PASS: Google recursive disk roundtrip/update/trash, ETag race and missing-tag protection, unsupported/duplicates, incomplete scans, large chunks and response-loss reconciliation");
     }
 }

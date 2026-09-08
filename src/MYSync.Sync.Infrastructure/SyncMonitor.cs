@@ -42,12 +42,10 @@ public sealed class SyncMonitor : IAsyncDisposable
         try
         {
             var transientCycles = 0;
-            var needsAttention = false;
             while (await signals.Reader.WaitToReadAsync(stop.Token))
             {
                 await Task.Delay(settle, stop.Token);
                 while (signals.Reader.TryRead(out _)) { }
-                if (needsAttention) continue;
                 Report(MonitorState.Running, "자동 동기화 검사·전송 중");
                 ExecutionReport report;
                 try { report = await cycle(stop.Token); }
@@ -75,8 +73,7 @@ public sealed class SyncMonitor : IAsyncDisposable
                         RequestScan();
                         continue;
                     }
-                    needsAttention = true;
-                    Report(MonitorState.NeedsAttention, "자동 켜짐 · 확인 대기. 일시정지 후 충돌·복구 또는 계정 설정을 확인하고 다시 시작하세요. " + string.Join(" / ", report.Issues));
+                    Report(MonitorState.NeedsAttention, "일부 항목 확인 필요 · 자동 감시 유지. 정상 파일은 계속 처리하고 다음 변경·정기 검사에서 다시 확인합니다. " + string.Join(" / ", report.Issues));
                     continue;
                 }
                 transientCycles = 0;

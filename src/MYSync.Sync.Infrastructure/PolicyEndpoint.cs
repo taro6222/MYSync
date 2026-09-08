@@ -3,7 +3,7 @@ using MYSync.Sync.Core;
 namespace MYSync.Sync.Infrastructure;
 
 /// <summary>Defense for saved jobs and conflict actions as well as freshly planned work.</summary>
-public sealed class PolicyEndpoint : ISyncEndpoint
+public sealed class PolicyEndpoint : ISyncEndpoint, IFileStateEndpoint
 {
     private readonly ISyncEndpoint inner;
     private readonly SyncPolicy policy;
@@ -19,6 +19,16 @@ public sealed class PolicyEndpoint : ISyncEndpoint
         var skipped = result.Entries.Where(x => policy.Exclusions.Matches(x.Path, x.Kind)).ToArray();
         return new(result.Entries.Except(skipped).ToArray(), result.Errors,
             result.Unsupported.Concat(skipped.Select(x => new UnsupportedItem(x.Path, "연결별 제외 규칙"))).ToArray());
+    }
+    public bool SupportsConcurrentFiles => inner is IFileStateEndpoint { SupportsConcurrentFiles: true };
+    public async Task<SyncEntry?> InspectFileAsync(string path, CancellationToken ct)
+    {
+        Check(path, EntryKind.File);
+        if (inner is IFileStateEndpoint scoped) return await scoped.InspectFileAsync(path, ct);
+        var snapshot = await ScanAsync(ct);
+        if (!snapshot.IsComplete || snapshot.Unsupported.Any(x => path.Equals(x.Path, StringComparison.OrdinalIgnoreCase) || path.StartsWith(x.Path + "/", StringComparison.OrdinalIgnoreCase)))
+            throw new SyncPreconditionException("파일 상태를 확인할 수 없습니다: " + path);
+        return snapshot.Entries.SingleOrDefault(x => x.Path.Equals(path, StringComparison.OrdinalIgnoreCase));
     }
     private void Check(string path, EntryKind kind)
     { if (policy.Exclusions.Matches(path, kind)) throw new SyncPreconditionException("제외 규칙으로 보호된 항목입니다: " + path); }

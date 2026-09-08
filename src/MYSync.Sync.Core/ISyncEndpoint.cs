@@ -29,3 +29,11 @@ public class SyncTransferException(string message, SyncFailureKind kind = SyncFa
 }
 /// <summary>The observed state did not match what the operation was planned against. Never retried blindly; the caller must re-scan.</summary>
 public sealed class SyncPreconditionException(string message) : SyncTransferException(message, SyncFailureKind.Precondition);
+
+/// <summary>Optional file-scoped revalidation. Must inspect current content without a planning cache.
+/// ConcurrentFiles opts into independent file operations only; directory changes remain exclusive.</summary>
+public interface IFileStateEndpoint
+{
+    bool SupportsConcurrentFiles { get; }
+    Task<SyncEntry?> InspectFileAsync(string path, CancellationToken cancellationToken);
+}

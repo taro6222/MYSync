@@ -8,7 +8,7 @@ namespace MYSync.Sync.Infrastructure;
 public sealed record RecoveryRecord(string Root, string RelativePath, string Action, SyncEntry Expected, string BackupPath, bool Verified);
 
 /// <summary>Local filesystem adapter with retained originals. Recovery must be on the same volume, outside sync roots.</summary>
-public sealed class LocalEndpoint : ISyncEndpoint, ISyncPolicyEndpoint
+public sealed class LocalEndpoint : ISyncEndpoint, ISyncPolicyEndpoint, IFileStateEndpoint
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> Gates = new(StringComparer.OrdinalIgnoreCase);
     public SyncPolicy Policy { get; set; } = new();
@@ -156,6 +156,13 @@ public sealed class LocalEndpoint : ISyncEndpoint, ISyncPolicyEndpoint
         using (var file = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
         { JsonSerializer.Serialize(file, record); file.Flush(true); }
         File.Move(temp, path, true);
+    }
+    public bool SupportsConcurrentFiles => true;
+    public async Task<SyncEntry?> InspectFileAsync(string path, CancellationToken ct)
+    {
+        await gate.WaitAsync(ct);
+        try { EnsureNoPending(); return await Inspect(path, ct); }
+        finally { gate.Release(); }
     }
     private async Task<SyncEntry?> Inspect(string path, CancellationToken ct)
     {

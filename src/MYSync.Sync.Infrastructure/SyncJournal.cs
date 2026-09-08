@@ -81,6 +81,89 @@ public sealed class SyncJournal
             }
         }
     }
+    /// <summary>Advance only paths whose current contents agree. Unresolved/unsupported paths
+    /// retain their prior baseline, so an unrelated failed file cannot turn later edits into first-sync conflicts.</summary>
+    public void CommitVerifiedPaths(Guid pair, ScanResult local, ScanResult remote)
+    {
+        var validation = SyncPlanner.Compare(local, remote, []);
+        if (!validation.CanExecute) throw new InvalidOperationException("불완전한 검사로 완료 상태를 저장할 수 없습니다.");
+        var left = local.Entries.ToDictionary(x => x.Path, StringComparer.OrdinalIgnoreCase);
+        var right = remote.Entries.ToDictionary(x => x.Path, StringComparer.OrdinalIgnoreCase);
+        var baseline = ReadBaseline(pair).ToDictionary(x => x.Path, StringComparer.OrdinalIgnoreCase);
+        bool Protected(string path) => validation.Unsupported.Any(x => path.Equals(x.Path, StringComparison.OrdinalIgnoreCase) ||
+            path.StartsWith(x.Path + "/", StringComparison.OrdinalIgnoreCase));
+        bool Equal(string path) => !Protected(path) && left.GetValueOrDefault(path) == right.GetValueOrDefault(path);
+        // Older releases could leave verified mutations in Applied without a global baseline.
+        // Their expected source is the version successfully published, even if a later edit is
+        // already visible now. Recover that common version before the next three-way comparison.
+        foreach (var job in ReadJobs(pair).Where(x => x.State == JobState.Applied && !Protected(x.Operation.Path)))
+        {
+            var op = job.Operation;
+            if (op.Action is SyncAction.Upload or SyncAction.Download)
+            {
+                var published = op.Action == SyncAction.Upload ? op.ExpectedLocal : op.ExpectedRemote;
+                if (published is not null) baseline[op.Path] = published;
+            }
+            else if (op.Action is SyncAction.DeleteLocal or SyncAction.DeleteRemote) baseline.Remove(op.Path);
+        }
+        foreach (var path in baseline.Keys.Concat(left.Keys).Concat(right.Keys).Distinct(StringComparer.OrdinalIgnoreCase).ToArray())
+        {
+            if (!Equal(path)) continue;
+            if (left.TryGetValue(path, out var entry)) baseline[path] = entry; else baseline.Remove(path);
+        }
+        // Keep a structurally valid baseline for protected descendants.
+        foreach (var path in baseline.Keys.ToArray())
+            for (var parent = path; parent.Contains('/');)
+            {
+                parent = parent[..parent.LastIndexOf('/')];
+                baseline.TryAdd(parent, new(parent, EntryKind.Directory, null));
+            }
+        using var c = Open(); using var tx = c.BeginTransaction();
+        using (var write = c.CreateCommand())
+        {
+            write.Transaction = tx;
+            write.CommandText = "INSERT INTO Baselines VALUES($pair,$payload) ON CONFLICT(PairId) DO UPDATE SET Payload=$payload";
+            write.Parameters.AddWithValue("$pair", pair.ToString());
+            write.Parameters.AddWithValue("$payload", JsonSerializer.Serialize(baseline.Values));
+            write.ExecuteNonQuery();
+        }
+        foreach (var job in ReadJobs(pair).Where(x => x.State == JobState.Applied && Equal(x.Operation.Path)))
+        {
+            using var done = c.CreateCommand(); done.Transaction = tx;
+            done.CommandText = "UPDATE Jobs SET State=$done WHERE Id=$id AND State=$applied";
+            done.Parameters.AddWithValue("$done", (int)JobState.Completed); done.Parameters.AddWithValue("$id", job.Id);
+            done.Parameters.AddWithValue("$applied", (int)JobState.Applied); done.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
+    /// <summary>Replace stale queue expectations after a complete scan, retaining unchanged job IDs
+    /// (including conflict-copy identities) and their failure history. No endpoint mutations here.</summary>
+    public void RefreshPlan(Guid pair, SyncPlan plan)
+    {
+        if (!plan.CanExecute) throw new InvalidOperationException("불완전한 검사 결과는 큐에 넣을 수 없습니다.");
+        var old = ReadJobs(pair).Where(x => x.State != JobState.Completed).ToArray();
+        if (old.Any(x => x.State == JobState.Running)) throw new InvalidOperationException("실행 중에는 계획을 교체할 수 없습니다.");
+        var remaining = plan.Operations.ToList();
+        using var c = Open(); using var tx = c.BeginTransaction();
+        foreach (var job in old)
+        {
+            var match = remaining.FindIndex(op => op.Path == job.Operation.Path && op.Action == job.Operation.Action &&
+                op.ExpectedLocal == job.Operation.ExpectedLocal && op.ExpectedRemote == job.Operation.ExpectedRemote);
+            if (match >= 0 && job.State != JobState.Applied) { remaining.RemoveAt(match); continue; }
+            using var done = c.CreateCommand(); done.Transaction = tx;
+            done.CommandText = "UPDATE Jobs SET State=$done WHERE Id=$id";
+            done.Parameters.AddWithValue("$done", (int)JobState.Completed); done.Parameters.AddWithValue("$id", job.Id); done.ExecuteNonQuery();
+        }
+        foreach (var op in remaining)
+        {
+            using var add = c.CreateCommand(); add.Transaction = tx;
+            add.CommandText = "INSERT INTO Jobs(PairId,Payload,State) VALUES($pair,$payload,$state)";
+            add.Parameters.AddWithValue("$pair", pair.ToString()); add.Parameters.AddWithValue("$payload", JsonSerializer.Serialize(op));
+            add.Parameters.AddWithValue("$state", (int)(op.Action == SyncAction.Conflict ? JobState.NeedsReconcile : JobState.Pending));
+            add.ExecuteNonQuery();
+        }
+        tx.Commit();
+    }
     public bool TryStart(long id)
     {
         using var c = Open(); using var cmd = c.CreateCommand();
