@@ -7,7 +7,7 @@ using MYSync.Sync.Core;
 namespace MYSync.Provider.GoogleDrive;
 
 /// <summary>First stage: OAuth and My Drive folder browsing. Does not claim transfer support.</summary>
-public sealed class GoogleDriveProvider : IProvider, IConfigurableProvider, IPersistableConnectionProvider, IBrowserLoginProvider
+public sealed partial class GoogleDriveProvider : IProvider, IConfigurableProvider, IPersistableConnectionProvider, IBrowserLoginProvider, ITransferProvider
 {
     private const string FolderType = "application/vnd.google-apps.folder";
     private readonly Func<IReadOnlyDictionary<string, string>, CancellationToken, Task<IGoogleSession>> connect;
@@ -21,12 +21,12 @@ public sealed class GoogleDriveProvider : IProvider, IConfigurableProvider, IPer
     public GoogleDriveProvider(Func<IReadOnlyDictionary<string, string>, CancellationToken, Task<IGoogleSession>> connect, Func<HttpMessageHandler> handlers)
     { this.connect = connect; this.handlers = handlers; }
     public string Id => "mysync.googledrive";
-    public string DisplayName => "Google Drive (연결·탐색)";
+    public string DisplayName => "Google Drive";
     public ProviderCapabilities Capabilities => ProviderCapabilities.None;
     public bool IsConnected => session is not null;
     public IReadOnlyList<ConnectionField> ConnectionFields => [];
     public string LoginButtonText => "Google로 로그인";
-    public string ConnectionInstructions => "Google로 로그인을 누르면 브라우저에서 계정과 접근 권한을 선택합니다. 현재는 폴더 탐색만 지원합니다.";
+    public string ConnectionInstructions => "Google로 로그인하여 파일 관리 권한을 승인하세요. 현재 파일 전송은 5 MiB 이하를 지원합니다.";
     public async Task ConnectAsync(IReadOnlyDictionary<string, string> values, CancellationToken ct)
     {
         // Saved accounts retain their original OAuth client binding. New logins use the distributor configuration.
@@ -43,7 +43,7 @@ public sealed class GoogleDriveProvider : IProvider, IConfigurableProvider, IPer
             candidate = await connect(values, timeout.Token);
             client = new HttpClient(handlers()) { Timeout = TimeSpan.FromSeconds(30), MaxResponseContentBufferSize = 4 * 1024 * 1024 };
             var root = await ReadFolder(client, candidate, "root", timeout.Token);
-            var saved = new Dictionary<string, string> { ["client_id"] = id, ["client_secret"] = secret, ["oauth_token"] = candidate.ExportToken() };
+            var saved = new Dictionary<string, string> { ["client_id"] = id, ["client_secret"] = secret, ["oauth_token"] = candidate.ExportToken(), ["oauth_scope"] = GoogleSession.Scope };
             session?.Dispose(); http?.Dispose();
             session = candidate; http = client; settings = saved; candidate = null; client = null;
             allowed.Clear(); allowed.Add("root"); allowed.Add(root.Id);

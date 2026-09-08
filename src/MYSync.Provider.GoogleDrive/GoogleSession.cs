@@ -15,13 +15,15 @@ public interface IGoogleSession : IDisposable
 
 internal sealed class GoogleSession(UserCredential credential) : IGoogleSession
 {
-    public const string Scope = "https://www.googleapis.com/auth/drive.readonly";
+    public const string Scope = "https://www.googleapis.com/auth/drive";
     public static async Task<IGoogleSession> ConnectAsync(IReadOnlyDictionary<string, string> values, CancellationToken ct)
     {
         var secrets = new ClientSecrets { ClientId = values["client_id"], ClientSecret = values["client_secret"] };
         UserCredential credential;
         if (values.TryGetValue("oauth_token", out var stored))
         {
+            if (!values.TryGetValue("oauth_scope", out var savedScope) || savedScope != Scope)
+                throw new SyncTransferException("Google 다시 로그인으로 파일 관리 권한을 승인하세요. 기존 읽기 전용 계정은 전송할 수 없습니다.", SyncFailureKind.Authentication);
             TokenResponse token;
             try { token = JsonConvert.DeserializeObject<TokenResponse>(stored) ?? throw new JsonException(); }
             catch (JsonException) { throw new InvalidOperationException("저장된 Google 인증 정보를 읽을 수 없습니다. 인증 정보를 수정하세요."); }
@@ -40,6 +42,8 @@ internal sealed class GoogleSession(UserCredential credential) : IGoogleSession
         try
         {
             await session.AccessTokenAsync(ct);
+            if (credential.Token.Scope is { Length: > 0 } granted && !granted.Split(' ').Contains(Scope, StringComparer.Ordinal))
+                throw new SyncTransferException("Google 파일 관리 권한이 승인되지 않았습니다. 다시 로그인하세요.", SyncFailureKind.Authentication);
             if (string.IsNullOrWhiteSpace(credential.Token.RefreshToken)) throw new InvalidOperationException("Google 갱신 토큰을 받지 못했습니다. Google 계정에서 기존 앱 권한을 해제한 뒤 다시 연결하세요.");
             return session;
         }

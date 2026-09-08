@@ -95,9 +95,11 @@ internal static class GoogleDriveChecks
         using var catalog = new PluginCatalog();
         catalog.Load(Path.Combine(root, "src", "MYSync.Desktop", "bin", "Debug", "net10.0-windows", "plugins"));
         var loaded = catalog.Providers.Single(x => x.Id == provider.Id);
-        Check(loaded is IPersistableConnectionProvider && loaded is not ITransferProvider, "shared optional contract or capability incorrect");
+        Check(loaded is IPersistableConnectionProvider && loaded is ITransferProvider, "shared optional contract or capability incorrect");
         var invalid = new Dictionary<string, string>(values) { ["oauth_token"] = "{" };
         await Reject(() => ((IConfigurableProvider)loaded).ConnectAsync(invalid, default));
+        try { await ((IConfigurableProvider)loaded).ConnectAsync(new Dictionary<string, string>(values) { ["oauth_token"] = "old-token", ["oauth_scope"] = "https://www.googleapis.com/auth/drive.readonly" }, default); throw new Exception("read-only account allowed transfers"); }
+        catch (SyncTransferException ex) when (ex.Kind == SyncFailureKind.Authentication) { }
         Console.WriteLine("PASS: Google folder pagination/IDs, incomplete/cross-parent/shared results rejected, cancellation, failed-session isolation, encrypted OAuth export, SDK plugin loading");
     }
 }

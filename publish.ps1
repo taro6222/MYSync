@@ -17,6 +17,7 @@ Get-ChildItem $output -Recurse -File -Filter 'MYSync.Provider.Abstractions.dll' 
 Get-ChildItem $output -Recurse -File -Filter 'MYSync.Sync.Core.dll' | Remove-Item -Force
 Copy-Item docs/manual-test.md "$output/TEST-GUIDE.md" -Force
 Copy-Item docs/google-drive-setup.md "$output/google-drive-setup.md" -Force
+Copy-Item docs/google-drive-transfer.md "$output/google-drive-transfer.md" -Force
 if (Test-Path -LiteralPath '.tools/google/oauth-client.json') {
     Copy-Item -LiteralPath '.tools/google/oauth-client.json' -Destination "$output/plugins/GoogleDrive/oauth-client.json" -Force
 }

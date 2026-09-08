@@ -4,6 +4,8 @@
 
 ## Google Drive 1단계
 
+최신 전송 단계: 사용자에게서 실제 Google 인증·폴더 탐색 성공을 확인했다. 이후 DriveEndpoint로 재귀 검사·5 MiB 이하 파일 업/다운로드·빈 폴더 생성·조건부 교체·파일 휴지통을 구현하고 수동/자동 엔진에 연결했다. 기존 계정은 Google 다시 로그인으로 drive 전체 관리 권한을 재승인해야 한다. 전체 자동 검증 통과, 경고·오류 0개. 실제 전송은 아직 미검증이다. [전송 정책](google-drive-transfer.md)을 우선한다. 아래 전송 미구현·읽기 전용 설명은 이전 단계 기록이다.
+
 최신 UI 보완: Google로 로그인/Google 다시 로그인 버튼을 사용하며 일반 사용자의 OAuth 입력창을 제거했다. IBrowserLoginProvider 선택 계약을 추가했다. 배포 공통 설정은 .tools/google/oauth-client.json에서 plugins/GoogleDrive/oauth-client.json으로 복사한다. 실제 공통 클라이언트 설정은 아직 미준비이므로 현 빌드는 설정 누락 안내를 표시한다. Google Cloud의 현재 열린 프로젝트를 변경하지 않았다.
 
 GoogleDrive Provider DLL에 공식 Google.Apis.Auth 1.76.0 기반 PKCE·브라우저 로그인, 갱신 토큰 재연결, 내 드라이브 폴더 탐색을 추가했다. 공통 선택 계약 IPersistableConnectionProvider로 생성 토큰을 기존 DPAPI 저장소에 넘긴다. SDK 평문 파일 저장은 사용하지 않는다. 호스트 연결 창은 Provider별 안내를 표시한다.

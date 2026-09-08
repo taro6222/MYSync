@@ -1,0 +1,236 @@
+using System.Net;
+using System.Net.Http.Headers;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using MYSync.Sync.Core;
+
+namespace MYSync.Provider.GoogleDrive;
+
+public sealed partial class GoogleDriveProvider
+{
+    public ISyncEndpoint OpenEndpoint(string remoteFolderId)
+    {
+        if (session is null || http is null) throw new InvalidOperationException("Google 계정에 먼저 연결하세요.");
+        if (string.IsNullOrWhiteSpace(remoteFolderId) || remoteFolderId.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('_' or '-')))
+            throw new ArgumentException("Google 폴더 ID가 올바르지 않습니다.");
+        return new DriveEndpoint(http, session, remoteFolderId);
+    }
+    private sealed class DriveEndpoint(HttpClient client, IGoogleSession account, string root) : ISyncEndpoint
+    {
+        private const long MaxFile = 5 * 1024 * 1024;
+        private const string Fields = "id,name,mimeType,parents,trashed,driveId,version,size";
+        private sealed record Item(string Id, string Name, string Mime, string[] Parents, string Version, long Size, bool Trashed, bool Shared, string? Tag = null)
+        { public bool Folder => Mime == FolderType; }
+        private static FileStream Temp() => new(Path.Combine(Path.GetTempPath(), "mysync-drive-" + Guid.NewGuid().ToString("N")), FileMode.CreateNew,
+            FileAccess.ReadWrite, FileShare.None, 65536, FileOptions.Asynchronous | FileOptions.DeleteOnClose);
+        private static Item Parse(JsonElement item, string? tag = null) => Valid(new(
+            item.GetProperty("id").GetString() ?? throw new InvalidDataException("Google ID 누락"),
+            item.GetProperty("name").GetString() ?? throw new InvalidDataException("Google 이름 누락"),
+            item.GetProperty("mimeType").GetString() ?? throw new InvalidDataException("Google 유형 누락"),
+            item.TryGetProperty("parents", out var parents) ? parents.EnumerateArray().Select(x => x.GetString()!).ToArray() : [],
+            item.GetProperty("version").GetString() ?? throw new InvalidDataException("Google 버전 누락"),
+            item.TryGetProperty("size", out var size) && long.TryParse(size.GetString(), out var length) ? length : 0,
+            item.TryGetProperty("trashed", out var trash) && trash.GetBoolean(), item.TryGetProperty("driveId", out _), tag));
+        private static Item Valid(Item item)
+        {
+            if (string.IsNullOrWhiteSpace(item.Id) || string.IsNullOrWhiteSpace(item.Name) || !ulong.TryParse(item.Version, out _) || item.Size < 0)
+                throw new InvalidDataException("Google 항목 ID·이름·버전·크기가 올바르지 않습니다.");
+            return item;
+        }
+        private static string? Unsupported(Item item)
+        {
+            if (item.Shared) return "공유 드라이브는 아직 지원하지 않습니다.";
+            if (!item.Folder && item.Mime.StartsWith("application/vnd.google-apps.", StringComparison.Ordinal)) return "Google 문서·바로가기는 동기화하지 않습니다.";
+            if (!item.Folder && item.Size > MaxFile) return "Google 파일 전송은 현재 5 MiB 이하만 지원합니다.";
+            return null;
+        }
+        private async Task<HttpResponseMessage> Send(HttpRequestMessage request, CancellationToken ct, bool streaming = false)
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", await account.AccessTokenAsync(ct));
+            var response = await client.SendAsync(request, streaming ? HttpCompletionOption.ResponseHeadersRead : HttpCompletionOption.ResponseContentRead, ct);
+            SyncDiagnostics.Write("googledrive.response", request.Method.Method, (int)response.StatusCode, response.Headers.ETag is { IsWeak: false });
+            if (!response.IsSuccessStatusCode)
+            {
+                var status = response.StatusCode; response.Dispose();
+                throw new SyncTransferException($"Google Drive 전송 실패 (HTTP {(int)status}). 권한과 현재 상태를 확인하세요.", status switch
+                {
+                    HttpStatusCode.Unauthorized => SyncFailureKind.Authentication, HttpStatusCode.Forbidden => SyncFailureKind.Permission,
+                    HttpStatusCode.NotFound => SyncFailureKind.Missing, HttpStatusCode.PreconditionFailed or HttpStatusCode.Conflict => SyncFailureKind.Precondition,
+                    HttpStatusCode.TooManyRequests or HttpStatusCode.RequestTimeout => SyncFailureKind.Transient,
+                    _ when (int)status >= 500 => SyncFailureKind.Transient, _ => SyncFailureKind.Unknown
+                });
+            }
+            return response;
+        }
+        private async Task<Item> Metadata(string id, CancellationToken ct)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://www.googleapis.com/drive/v3/files/" + Uri.EscapeDataString(id) + "?fields=" + Fields);
+            using var response = await Send(request, ct); using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            var item = Parse(doc.RootElement, response.Headers.ETag is { IsWeak: false } tag && tag.Tag != "*" ? tag.ToString() : null);
+            if (item.Id != id && id != "root" || item.Trashed || item.Shared) throw new SyncPreconditionException("Google 항목이 이동·삭제되었거나 지원 범위 밖입니다.");
+            return item;
+        }
+        private async Task<List<Item>> Children(string id, CancellationToken ct)
+        {
+            var result = new List<Item>(); var ids = new HashSet<string>(StringComparer.Ordinal); var pages = new HashSet<string>(); string? page = null;
+            do
+            {
+                var query = Uri.EscapeDataString($"'{Escape(id)}' in parents and trashed=false");
+                using var request = new HttpRequestMessage(HttpMethod.Get, "https://www.googleapis.com/drive/v3/files?q=" + query + "&corpora=user&spaces=drive&pageSize=1000&fields="
+                    + Uri.EscapeDataString("nextPageToken,incompleteSearch,files(" + Fields + ")") + (page is null ? "" : "&pageToken=" + Uri.EscapeDataString(page)));
+                using var response = await Send(request, ct); using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+                if (doc.RootElement.TryGetProperty("incompleteSearch", out var incomplete) && incomplete.GetBoolean()) throw new InvalidDataException("Google 검색 결과가 불완전합니다.");
+                foreach (var value in doc.RootElement.GetProperty("files").EnumerateArray())
+                {
+                    var item = Parse(value);
+                    if (!ids.Add(item.Id) || !item.Parents.Contains(id) || item.Trashed) throw new InvalidDataException("Google 목록 ID·상위 폴더 오류");
+                    result.Add(item);
+                    if (result.Count > 100000) throw new InvalidDataException("Google 항목 한도 초과");
+                }
+                page = doc.RootElement.TryGetProperty("nextPageToken", out var next) ? next.GetString() : null;
+                if (!string.IsNullOrEmpty(page) && (!pages.Add(page) || pages.Count > 100)) throw new InvalidDataException("Google 페이지 조회 한도 초과");
+            } while (!string.IsNullOrEmpty(page));
+            return result;
+        }
+        public async Task<ScanResult> ScanAsync(CancellationToken ct)
+        {
+            var entries = new List<SyncEntry>(); var notices = new List<UnsupportedItem>(); var visited = new HashSet<string>();
+            try
+            {
+                var folder = await Metadata(root, ct); if (!folder.Folder) throw new SyncPreconditionException("Google 루트가 폴더가 아닙니다.");
+                await Visit(folder.Id, "", 0); return new(entries, [], notices);
+            }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or InvalidOperationException or JsonException or HttpRequestException or KeyNotFoundException)
+            { return new(entries, ["Google 검사 실패: " + ex.Message], notices); }
+            async Task Visit(string id, string prefix, int depth)
+            {
+                ct.ThrowIfCancellationRequested();
+                if (depth > 128 || !visited.Add(id) || visited.Count + entries.Count > 100000) throw new InvalidDataException("Google 폴더 순환 또는 검사 한도 초과");
+                foreach (var group in (await Children(id, ct)).GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
+                {
+                    var item = group.First();
+                    if (string.IsNullOrWhiteSpace(item.Name) || item.Name is "." or ".." || item.Name.IndexOfAny(['/', '\\', ':']) >= 0 || item.Name.Any(char.IsControl))
+                        throw new InvalidDataException("상대 경로로 표현할 수 없는 Google 이름입니다.");
+                    var path = prefix + item.Name;
+                    if (group.Count() > 1) { notices.Add(new(path, "같은 이름의 Google 항목이 여러 개입니다.")); continue; }
+                    if (Unsupported(item) is { } why) { notices.Add(new(path, why)); continue; }
+                    if (item.Folder) { entries.Add(new(path, EntryKind.Directory, null)); await Visit(item.Id, path + "/", depth + 1); }
+                    else { var (stream, hash) = await Download(item, ct); await stream.DisposeAsync(); entries.Add(new(path, EntryKind.File, hash)); }
+                }
+            }
+        }
+        private static string[] Parts(string path)
+        {
+            var parts = path.Split('/');
+            if (parts.Any(x => string.IsNullOrWhiteSpace(x) || x is "." or ".." || x.Contains('\\') || x.Contains(':') || x.Any(char.IsControl)))
+                throw new SyncPreconditionException("지원하지 않는 상대 경로입니다.");
+            return parts;
+        }
+        private async Task<(Item Parent, Item? Existing)> Resolve(string path, CancellationToken ct)
+        {
+            var parts = Parts(path); var parent = await Metadata(root, ct);
+            if (!parent.Folder) throw new SyncPreconditionException("Google 루트가 폴더가 아닙니다.");
+            for (var i = 0; i < parts.Length; i++)
+            {
+                var matches = (await Children(parent.Id, ct)).Where(x => string.Equals(x.Name, parts[i], StringComparison.OrdinalIgnoreCase)).ToArray();
+                if (matches.Length > 1) throw new SyncPreconditionException("Google 경로에 중복 이름이 있습니다.");
+                var found = matches.SingleOrDefault();
+                if (found is not null && (found.Name != parts[i] || Unsupported(found) is not null)) throw new SyncPreconditionException("Google 경로의 이름·유형을 처리할 수 없습니다.");
+                if (i == parts.Length - 1) return (parent, found);
+                if (found is null || !found.Folder) throw new SyncPreconditionException("Google 상위 폴더가 없습니다.");
+                parent = await Metadata(found.Id, ct);
+            }
+            throw new InvalidOperationException();
+        }
+        private static bool Same(Item a, Item b) => a.Id == b.Id && a.Version == b.Version && a.Name == b.Name && a.Mime == b.Mime && a.Parents.SequenceEqual(b.Parents);
+        private async Task<(FileStream Stream, string Hash)> Download(Item expected, CancellationToken ct)
+        {
+            if (expected.Folder || Unsupported(expected) is not null) throw new SyncPreconditionException("다운로드할 수 없는 Google 항목입니다.");
+            var before = await Metadata(expected.Id, ct);
+            if (!Same(before, expected)) throw new SyncPreconditionException("Google 파일이 검사 이후 변경되었습니다.");
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct); timeout.CancelAfter(TimeSpan.FromMinutes(5));
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://www.googleapis.com/drive/v3/files/" + Uri.EscapeDataString(expected.Id) + "?alt=media");
+            using var response = await Send(request, timeout.Token, true); var stream = Temp();
+            try
+            {
+                var buffer = new byte[65536]; await using var input = await response.Content.ReadAsStreamAsync(timeout.Token);
+                int read;
+                while ((read = await input.ReadAsync(buffer, timeout.Token)) != 0)
+                { if (stream.Length + read > MaxFile) throw new SyncPreconditionException("Google 파일은 현재 5 MiB 이하만 전송합니다."); await stream.WriteAsync(buffer.AsMemory(0, read), timeout.Token); }
+                stream.Position = 0; var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, timeout.Token)); stream.Position = 0;
+                if (!Same(before, await Metadata(expected.Id, timeout.Token))) throw new SyncPreconditionException("다운로드 중 Google 파일이 변경되었습니다.");
+                return (stream, hash);
+            }
+            catch { await stream.DisposeAsync(); throw; }
+        }
+        public async Task<Stream> OpenReadAsync(SyncEntry expected, CancellationToken ct)
+        {
+            var (_, item) = await Resolve(expected.Path, ct);
+            if (item is null || expected.Kind != EntryKind.File) throw new SyncPreconditionException("Google 파일이 없습니다.");
+            var (stream, hash) = await Download(item, ct);
+            if (hash == expected.ContentHash) return stream;
+            await stream.DisposeAsync(); throw new SyncPreconditionException("Google 파일 내용이 변경되었습니다.");
+        }
+        private async Task<Item> Verify(Item item, SyncEntry expected, CancellationToken ct)
+        {
+            if (expected.Kind != EntryKind.File) throw new SyncPreconditionException("Google 파일 유형이 다릅니다.");
+            var (stream, hash) = await Download(item, ct); await stream.DisposeAsync();
+            var current = await Metadata(item.Id, ct);
+            if (hash != expected.ContentHash || !Same(item, current)) throw new SyncPreconditionException("Google 대상 내용이 변경되었습니다.");
+            if (current.Tag is null) throw new SyncPreconditionException("Google 응답에 강한 ETag가 없어 안전한 교체·휴지통 이동을 중단합니다.");
+            return current;
+        }
+        private async Task<string> GenerateId(CancellationToken ct)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Get, "https://www.googleapis.com/drive/v3/files/generateIds?count=1&space=drive&type=files");
+            using var response = await Send(request, ct); using var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync(ct));
+            return doc.RootElement.GetProperty("ids").EnumerateArray().Single().GetString()!;
+        }
+        public async Task PutFileAsync(string path, SyncEntry? expected, Stream content, string sha256, CancellationToken ct)
+        {
+            await using var data = Temp(); var buffer = new byte[65536]; int n;
+            while ((n = await content.ReadAsync(buffer, ct)) != 0)
+            { if (data.Length + n > MaxFile) throw new SyncPreconditionException("Google 업로드는 현재 5 MiB 이하만 지원합니다."); await data.WriteAsync(buffer.AsMemory(0, n), ct); }
+            data.Position = 0;
+            if (Convert.ToHexString(await SHA256.HashDataAsync(data, ct)) != sha256) throw new SyncPreconditionException("업로드 해시 불일치");
+            data.Position = 0;
+            var (parent, existing) = await Resolve(path, ct);
+            if (expected is null && existing is not null || expected is not null && (existing is null || expected.Path != path)) throw new SyncPreconditionException("Google 업로드 대상이 변경되었습니다.");
+            if (existing is not null) existing = await Verify(existing, expected!, ct);
+            var id = existing?.Id ?? await GenerateId(ct);
+            using var body = new MultipartContent("related");
+            body.Add(new StringContent(JsonSerializer.Serialize(existing is null ? new { id, name = Parts(path)[^1], parents = new[] { parent.Id } } : (object)new { }), Encoding.UTF8, "application/json"));
+            var media = new StreamContent(data); media.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream"); body.Add(media);
+            using var request = new HttpRequestMessage(existing is null ? HttpMethod.Post : HttpMethod.Patch,
+                "https://www.googleapis.com/upload/drive/v3/files" + (existing is null ? "" : "/" + Uri.EscapeDataString(id)) + "?uploadType=multipart&fields=id");
+            request.Content = body;
+            if (existing is not null) request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(existing.Tag!));
+            using var response = await Send(request, ct);
+            var (_, published) = await Resolve(path, ct);
+            if (published?.Id != id) throw new SyncPreconditionException("게시 이후 Google 이름 충돌 또는 이동을 확인해야 합니다.");
+            var (check, hash) = await Download(published, ct); await check.DisposeAsync();
+            if (hash != sha256) throw new SyncPreconditionException("게시된 Google 파일 내용이 다릅니다.");
+        }
+        public async Task CreateDirectoryAsync(string path, CancellationToken ct)
+        {
+            var (parent, existing) = await Resolve(path, ct); if (existing is not null) throw new SyncPreconditionException("Google 항목이 이미 있습니다.");
+            var id = await GenerateId(ct);
+            using var request = new HttpRequestMessage(HttpMethod.Post, "https://www.googleapis.com/drive/v3/files?fields=id")
+            { Content = new StringContent(JsonSerializer.Serialize(new { id, name = Parts(path)[^1], mimeType = FolderType, parents = new[] { parent.Id } }), Encoding.UTF8, "application/json") };
+            using var response = await Send(request, ct);
+            var (_, created) = await Resolve(path, ct); if (created?.Id != id) throw new SyncPreconditionException("Google 폴더 생성 이후 이름 충돌을 확인하세요.");
+        }
+        public async Task DeleteAsync(SyncEntry expected, CancellationToken ct)
+        {
+            if (expected.Kind == EntryKind.Directory) throw new SyncPreconditionException("Google 폴더 삭제는 하위 변경 보호 구현 전까지 중단합니다.");
+            var (_, found) = await Resolve(expected.Path, ct); if (found is null) throw new SyncPreconditionException("Google 파일이 없습니다.");
+            var verified = await Verify(found, expected, ct);
+            using var request = new HttpRequestMessage(HttpMethod.Patch, "https://www.googleapis.com/drive/v3/files/" + Uri.EscapeDataString(found.Id) + "?fields=id,trashed")
+            { Content = new StringContent("{\"trashed\":true}", Encoding.UTF8, "application/json") };
+            request.Headers.IfMatch.Add(EntityTagHeaderValue.Parse(verified.Tag!));
+            using var response = await Send(request, ct);
+            if ((await Resolve(expected.Path, ct)).Existing is not null) throw new SyncPreconditionException("Google 휴지통 이동 결과를 재확인하세요.");
+        }
+    }
+}

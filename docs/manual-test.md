@@ -45,6 +45,8 @@
 
 ## 현재 제한
 
+Google 전송 업데이트: 새 버전에서 Google 다시 로그인으로 파일 관리 권한을 승인한 뒤 테스트 폴더 쌍을 저장할 수 있다. 5 MiB 이하 파일의 업/다운로드·수정·휴지통 이동을 검사·실행에서 확인한다. 자세한 내용은 [google-drive-transfer.md](google-drive-transfer.md)를 따른다. 이전의 Google 탐색 전용·쌍 저장 차단 설명은 초기 단계 기록이다.
+
 ETag 재테스트: 새 테스트 폴더에서 최초 업로드·교체·삭제를 수행하고 로그의 `webdav.resource-etag`와 `webdav.response`를 비교하세요. GET 헤더 ETag가 없어도 PROPFIND에 강한 ETag가 있으면 전송할 수 있습니다. 실제 Synology 검증은 아직 남아 있으며, 이전 잔류 `.mysync-upload-` 파일을 자동으로 정리하지 않습니다.
 
 - 수동 실행은 실제 파일을 추가·수정·삭제합니다. 작업 목록의 DeleteLocal·DeleteRemote는 삭제 전파입니다. 먼저 별도의 테스트 폴더에서 확인하세요.

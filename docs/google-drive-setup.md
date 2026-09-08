@@ -1,5 +1,7 @@
 # Google Drive 로그인 설정
 
+전송 단계 업데이트: 이제 동기화 쌍 저장과 5 MiB 이하 파일 전송을 지원한다. 공통 OAuth 설정은 준비됐고 사용자가 로그인·탐색 성공을 확인했다. 전송에는 `https://www.googleapis.com/auth/drive` 범위를 추가하고 기존 계정에서 Google 다시 로그인해야 한다. 아래 읽기 전용·탐색 전용 문구는 초기 안내이며 [전송 안내](google-drive-transfer.md)를 우선한다.
+
 일반 사용자는 Google Cloud 설정 없이 **Google로 로그인** 버튼으로 연결한다. 공통 OAuth 설정은 앱 배포자가 한 번 준비한다. 현재 Google Drive는 로그인·폴더 탐색만 지원하며 파일 전송은 후속 단계다.
 
 ## 사용자의 연결 순서
