@@ -23,6 +23,26 @@ public sealed partial class GoogleDriveProvider
         private const string Fields = "id,name,mimeType,parents,trashed,driveId,version,size,sha256Checksum";
         private sealed record Item(string Id, string Name, string Mime, string[] Parents, string Version, long Size, bool Trashed, bool Shared, string? Tag = null, string? Sha256 = null, bool LegacyTag = false)
         { public bool Folder => Mime == FolderType; }
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Item Item, string Hash, long At)> hashes = new();
+        private string? KnownHash(Item item)
+        {
+            if (item.Sha256 is { Length: 64 } hash && hash.All(Uri.IsHexDigit)) return hash;
+            if (hashes.TryGetValue(item.Id, out var cached) && Same(cached.Item, item) &&
+                System.Diagnostics.Stopwatch.GetElapsedTime(cached.At) < TimeSpan.FromMinutes(5)) return cached.Hash;
+            return null;
+        }
+        private void Remember(Item item, string hash)
+        {
+            if (hashes.Count >= 10000) hashes.Clear();
+            hashes[item.Id] = (item, hash, System.Diagnostics.Stopwatch.GetTimestamp());
+        }
+        private async Task<string> ReadHash(Item item, CancellationToken ct)
+        {
+            if (KnownHash(item) is { } known) return known;
+            var (stream, hash) = await Download(item, ct);
+            await stream.DisposeAsync();
+            return hash;
+        }
         private static FileStream Temp() => new(Path.Combine(Path.GetTempPath(), "mysync-drive-" + Guid.NewGuid().ToString("N")), FileMode.CreateNew,
             FileAccess.ReadWrite, FileShare.None, 65536, FileOptions.Asynchronous | FileOptions.DeleteOnClose);
         private static Item Parse(JsonElement item, string? tag = null) => Valid(new(
@@ -96,32 +116,50 @@ public sealed partial class GoogleDriveProvider
         }
         public async Task<ScanResult> ScanAsync(CancellationToken ct)
         {
-            var entries = new List<SyncEntry>(); var notices = new List<UnsupportedItem>(); var visited = new HashSet<string>();
+            var entries = new System.Collections.Concurrent.ConcurrentBag<SyncEntry>();
+            var notices = new System.Collections.Concurrent.ConcurrentBag<UnsupportedItem>();
+            var visited = new HashSet<string>();
+            var pending = new System.Collections.Concurrent.ConcurrentQueue<(string Id, string Prefix, int Depth)>();
             try
             {
-                var folder = await Metadata(root, ct); if (!folder.Folder) throw new SyncPreconditionException("Google 루트가 폴더가 아닙니다.");
-                await Visit(folder.Id, "", 0); return new(entries, [], notices);
+                var folder = await Metadata(root, ct);
+                if (!folder.Folder) throw new SyncPreconditionException("Google 루트가 폴더가 아닙니다.");
+                pending.Enqueue((folder.Id, "", 0));
+                while (!pending.IsEmpty)
+                {
+                    var batch = new List<(string Id, string Prefix, int Depth)>();
+                    while (batch.Count < 3 && pending.TryDequeue(out var node))
+                    {
+                        if (node.Depth > 128 || !visited.Add(node.Id) || visited.Count + entries.Count > 100000)
+                            throw new InvalidDataException("Google 폴더 순환 또는 검사 한도 초과");
+                        batch.Add(node);
+                    }
+                    var listed = await Task.WhenAll(batch.Select(async node => (Node: node, Items: await Children(node.Id, ct))));
+                    var groups = listed.SelectMany(x => x.Items.GroupBy(item => item.Name, StringComparer.OrdinalIgnoreCase)
+                        .Select(group => (x.Node, Items: group.ToArray()))).ToArray();
+                    await Parallel.ForEachAsync(groups, new ParallelOptions { MaxDegreeOfParallelism = 3, CancellationToken = ct }, async (group, token) =>
+                    {
+                        var item = group.Items[0];
+                        if (string.IsNullOrWhiteSpace(item.Name) || item.Name is "." or ".." ||
+                            item.Name.IndexOfAny(['/', '\\', ':']) >= 0 || item.Name.Any(char.IsControl))
+                            throw new InvalidDataException("상대 경로로 표현할 수 없는 Google 이름입니다.");
+                        var path = group.Node.Prefix + item.Name;
+                        if (Policy.Exclusions.Matches(path, item.Folder ? EntryKind.Directory : EntryKind.File)) { notices.Add(new(path, "연결별 제외 규칙")); return; }
+                        if (group.Items.Length > 1) { notices.Add(new(path, "같은 이름의 Google 항목이 여러 개입니다.")); return; }
+                        if (Unsupported(item) is { } why) { notices.Add(new(path, why)); return; }
+                        if (item.Folder)
+                        {
+                            entries.Add(new(path, EntryKind.Directory, null));
+                            pending.Enqueue((item.Id, path + "/", group.Node.Depth + 1));
+                        }
+                        else entries.Add(new(path, EntryKind.File, await ReadHash(item, token)));
+                    });
+                    if (visited.Count + entries.Count > 100000) throw new InvalidDataException("Google 검사 한도 초과");
+                }
+                return new(entries.OrderBy(x => x.Path, StringComparer.Ordinal).ToArray(), [], notices.ToArray());
             }
             catch (Exception ex) when (ex is IOException or InvalidDataException or InvalidOperationException or JsonException or HttpRequestException or KeyNotFoundException)
-            { return new(entries, ["Google 검사 실패: " + ex.Message], notices); }
-            async Task Visit(string id, string prefix, int depth)
-            {
-                ct.ThrowIfCancellationRequested();
-                if (depth > 128 || !visited.Add(id) || visited.Count + entries.Count > 100000) throw new InvalidDataException("Google 폴더 순환 또는 검사 한도 초과");
-                foreach (var group in (await Children(id, ct)).GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase))
-                {
-                    var item = group.First();
-                    if (string.IsNullOrWhiteSpace(item.Name) || item.Name is "." or ".." || item.Name.IndexOfAny(['/', '\\', ':']) >= 0 || item.Name.Any(char.IsControl))
-                        throw new InvalidDataException("상대 경로로 표현할 수 없는 Google 이름입니다.");
-                    var path = prefix + item.Name;
-                    if (Policy.Exclusions.Matches(path, item.Folder ? EntryKind.Directory : EntryKind.File)) { notices.Add(new(path, "연결별 제외 규칙")); continue; }
-                    if (group.Count() > 1) { notices.Add(new(path, "같은 이름의 Google 항목이 여러 개입니다.")); continue; }
-                    if (Unsupported(item) is { } why) { notices.Add(new(path, why)); continue; }
-                    if (item.Folder) { entries.Add(new(path, EntryKind.Directory, null)); await Visit(item.Id, path + "/", depth + 1); }
-                    else if (item.Sha256 is { Length: 64 } hash && hash.All(Uri.IsHexDigit)) entries.Add(new(path, EntryKind.File, hash));
-                    else { var (stream, downloadedHash) = await Download(item, ct); await stream.DisposeAsync(); entries.Add(new(path, EntryKind.File, downloadedHash)); }
-                }
-            }
+            { return new(entries.ToArray(), ["Google 검사 실패: " + ex.Message], notices.ToArray()); }
         }
         public bool SupportsConcurrentFiles => true;
         public async Task<SyncEntry?> InspectFileAsync(string path, CancellationToken ct)
@@ -129,9 +167,9 @@ public sealed partial class GoogleDriveProvider
             var (_, item) = await Resolve(path, ct);
             if (item is null) return null;
             if (item.Folder) return new(path, EntryKind.Directory, null);
-            var (stream, hash) = await Download(item, ct);
-            await stream.DisposeAsync();
-            return new(path, EntryKind.File, hash);
+            var current = await Metadata(item.Id, ct);
+            if (!Same(item, current)) throw new SyncPreconditionException("검사 중 Google 파일이 변경되었습니다.");
+            return new(path, EntryKind.File, await ReadHash(current, ct));
         }
         private static string[] Parts(string path)
         {
@@ -156,7 +194,7 @@ public sealed partial class GoogleDriveProvider
             }
             throw new InvalidOperationException();
         }
-        private static bool Same(Item a, Item b) => a.Id == b.Id && a.Version == b.Version && a.Name == b.Name && a.Mime == b.Mime && a.Parents.SequenceEqual(b.Parents);
+        private static bool Same(Item a, Item b) => a.Id == b.Id && a.Version == b.Version && a.Name == b.Name && a.Mime == b.Mime && a.Size == b.Size && a.Sha256 == b.Sha256 && a.Parents.SequenceEqual(b.Parents);
         private async Task<(FileStream Stream, string Hash)> Download(Item expected, CancellationToken ct)
         {
             if (expected.Folder || Unsupported(expected) is not null) throw new SyncPreconditionException("다운로드할 수 없는 Google 항목입니다.");
@@ -168,13 +206,17 @@ public sealed partial class GoogleDriveProvider
             using var response = await Send(request, timeout.Token, true); var stream = Temp();
             try
             {
+                using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                 var buffer = new byte[65536]; await using var input = await response.Content.ReadAsStreamAsync(timeout.Token);
                 int read;
                 while ((read = await input.ReadAsync(buffer, timeout.Token)) != 0)
-                { if (stream.Length + read > expected.Size) throw new SyncPreconditionException("다운로드 크기가 검사한 파일 크기와 다릅니다."); await Policy.Bandwidth.WaitAsync(read, timeout.Token); await stream.WriteAsync(buffer.AsMemory(0, read), timeout.Token); }
+                { if (stream.Length + read > expected.Size) throw new SyncPreconditionException("다운로드 크기가 검사한 파일 크기와 다릅니다."); await Policy.Bandwidth.WaitAsync(read, timeout.Token); digest.AppendData(buffer, 0, read); await stream.WriteAsync(buffer.AsMemory(0, read), timeout.Token); }
                 if (stream.Length != expected.Size) throw new SyncPreconditionException("불완전한 다운로드입니다.");
-                stream.Position = 0; var hash = Convert.ToHexString(await SHA256.HashDataAsync(stream, timeout.Token)); stream.Position = 0;
+                var hash = Convert.ToHexString(digest.GetHashAndReset()); stream.Position = 0;
+                if (before.Sha256 is { Length: 64 } checksum && checksum.All(Uri.IsHexDigit) && checksum != hash)
+                    throw new SyncPreconditionException("Google 다운로드 내용이 서버 체크섬과 다릅니다.");
                 if (!Same(before, await Metadata(expected.Id, timeout.Token))) throw new SyncPreconditionException("다운로드 중 Google 파일이 변경되었습니다.");
+                Remember(before, hash);
                 return (stream, hash);
             }
             catch { await stream.DisposeAsync(); throw; }
@@ -190,7 +232,9 @@ public sealed partial class GoogleDriveProvider
         private async Task<Item> Verify(Item item, SyncEntry expected, CancellationToken ct)
         {
             if (expected.Kind != EntryKind.File) throw new SyncPreconditionException("Google 파일 유형이 다릅니다.");
-            var (stream, hash) = await Download(item, ct); await stream.DisposeAsync();
+            var before = await Metadata(item.Id, ct);
+            if (!Same(item, before)) throw new SyncPreconditionException("Google 대상 버전이 변경되었습니다.");
+            var hash = await ReadHash(before, ct);
             var current = await Metadata(item.Id, ct);
             if (hash != expected.ContentHash || !Same(item, current)) throw new SyncPreconditionException("Google 대상 내용이 변경되었습니다.");
             if (current.Tag is null)
@@ -219,11 +263,12 @@ public sealed partial class GoogleDriveProvider
         }
         public async Task PutFileAsync(string path, SyncEntry? expected, Stream content, string sha256, CancellationToken ct)
         {
+            using var digest = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
             await using var data = Temp(); var buffer = new byte[65536]; int n;
             while ((n = await content.ReadAsync(buffer, ct)) != 0)
-            { await data.WriteAsync(buffer.AsMemory(0, n), ct); }
+            { digest.AppendData(buffer, 0, n); await data.WriteAsync(buffer.AsMemory(0, n), ct); }
             data.Position = 0;
-            if (Convert.ToHexString(await SHA256.HashDataAsync(data, ct)) != sha256) throw new SyncPreconditionException("업로드 해시 불일치");
+            if (Convert.ToHexString(digest.GetHashAndReset()) != sha256) throw new SyncPreconditionException("업로드 해시 불일치");
             data.Position = 0;
             var (parent, existing) = await Resolve(path, ct);
             if (expected is null && existing is not null || expected is not null && (existing is null || expected.Path != path)) throw new SyncPreconditionException("Google 업로드 대상이 변경되었습니다.");
@@ -244,7 +289,9 @@ public sealed partial class GoogleDriveProvider
             }
             var (_, published) = await Resolve(path, ct);
             if (published?.Id != id) throw new SyncPreconditionException("게시 이후 Google 이름 충돌 또는 이동을 확인해야 합니다.");
-            var (check, hash) = await Download(published, ct); await check.DisposeAsync();
+            var currentPublished = await Metadata(id, ct);
+            if (!Same(published, currentPublished)) throw new SyncPreconditionException("게시 이후 Google 파일이 변경되었습니다.");
+            var hash = await ReadHash(currentPublished, ct);
             if (hash != sha256) throw new SyncPreconditionException("게시된 Google 파일 내용이 다릅니다.");
         }
         private async Task UploadChunks(FileStream data, Item parent, Item? existing, string id, string path, CancellationToken ct)

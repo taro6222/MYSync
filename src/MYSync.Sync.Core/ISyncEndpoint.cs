@@ -30,7 +30,7 @@ public class SyncTransferException(string message, SyncFailureKind kind = SyncFa
 /// <summary>The observed state did not match what the operation was planned against. Never retried blindly; the caller must re-scan.</summary>
 public sealed class SyncPreconditionException(string message) : SyncTransferException(message, SyncFailureKind.Precondition);
 
-/// <summary>Optional file-scoped revalidation. Must inspect current content without a planning cache.
+/// <summary>Optional file-scoped revalidation. Must inspect current content; fresh server version metadata may validate a version-bound hash. A time-based planning cache alone is insufficient.
 /// ConcurrentFiles opts into independent file operations only; directory changes remain exclusive.</summary>
 public interface IFileStateEndpoint
 {

@@ -58,4 +58,5 @@ if (File.Exists(Path.Combine(root, ".tools", "google", "oauth-client.json")))
 await TransferControlChecks.Run(scratch);
 await ConcurrentChecks.Run(scratch);
 await FileResolutionChecks.Run(scratch);
+await CompletionChecks.Run(scratch);
 Console.WriteLine("All checks passed.");

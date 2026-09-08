@@ -33,7 +33,7 @@ public sealed class SyncExecutor(SyncJournal journal, RetryPolicy? retryPolicy =
 {
     private readonly RetryPolicy retry = retryPolicy ?? new RetryPolicy();
 
-    public async Task<ExecutionReport> RunAsync(Guid pair, ISyncEndpoint local, ISyncEndpoint remote, CancellationToken ct = default, IProgress<SyncProgress>? progress = null, TransferControl? control = null, string? onlyPath = null)
+    public async Task<ExecutionReport> RunAsync(Guid pair, ISyncEndpoint local, ISyncEndpoint remote, CancellationToken ct = default, IProgress<SyncProgress>? progress = null, TransferControl? control = null, string? onlyPath = null, SyncSnapshots? initialSnapshots = null)
     {
         using var controlRun = control?.BeginRun();
         var runId = Guid.NewGuid();
@@ -56,7 +56,8 @@ public sealed class SyncExecutor(SyncJournal journal, RetryPolicy? retryPolicy =
         SyncPlan initialPlan;
         try
         {
-            var initialLocal = await local.ScanAsync(ct); var initialRemote = await remote.ScanAsync(ct);
+            var snapshots = initialSnapshots ?? await SyncSnapshots.ReadAsync(local, remote, ct);
+            var initialLocal = snapshots.Local; var initialRemote = snapshots.Remote;
             initialPlan = SyncPlanner.Compare(initialLocal, initialRemote, journal.ReadBaseline(pair));
             if (!initialPlan.CanExecute) throw new SyncPreconditionException(string.Join(" / ", initialPlan.Errors));
         }
@@ -163,7 +164,8 @@ public sealed class SyncExecutor(SyncJournal journal, RetryPolicy? retryPolicy =
                     issues.Add(op.Path + ": 충돌 원본과 보존 사본을 확인해야 합니다.");
                     Report(new(SyncPhase.Attention, "충돌 확인 필요", op.Path, op.Action, completed, total, Event: TransferEvent.Failed));
                 }
-                else { journal.SetOutcome(job.Id, JobState.Applied); Interlocked.Increment(ref completed); SyncDiagnostics.Write("job.applied"); Report(new(SyncPhase.Verifying, "반영됨 · 최종 검증 대기", op.Path, op.Action, completed, total, Event: TransferEvent.Applied)); }
+                else { journal.SetOutcome(job.Id, JobState.Applied); Interlocked.Increment(ref completed); SyncDiagnostics.Write("job.applied"); Report(new(SyncPhase.Verifying, "파일 반영·내용 검증 완료", op.Path, op.Action, completed, total, Event: TransferEvent.Applied));
+                    Report(new(SyncPhase.Idle, "파일 처리 완료 · 전체 폴더 비교는 별도 진행", op.Path, op.Action, completed, total, Event: TransferEvent.Completed)); }
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested && control is not null && jobToken.IsCancellationRequested)
             {
@@ -210,13 +212,14 @@ public sealed class SyncExecutor(SyncJournal journal, RetryPolicy? retryPolicy =
             }
             await Flush();
             var transientOnly = issues.Count > 0 && permanent == 0;
-            Report(new(SyncPhase.Verifying, "전송 결과를 파일별로 확인 중", Completed: completed, Total: total));
-            var verifiedLocal = await local.ScanAsync(ct); var verifiedRemote = await remote.ScanAsync(ct);
+            Report(new(SyncPhase.Verifying, "전체 폴더 비교 중 · 완료된 파일은 사용 가능합니다", Completed: completed, Total: total));
+            var verified = await SyncSnapshots.ReadAsync(local, remote, ct);
+            var verifiedLocal = verified.Local; var verifiedRemote = verified.Remote;
             if (verifiedLocal.IsComplete && verifiedRemote.IsComplete) journal.CommitVerifiedPaths(pair, verifiedLocal, verifiedRemote);
             var jobs = journal.ReadJobs(pair);
-            foreach (var verified in jobs.Where(x => x.State == JobState.Completed && identities.ContainsKey(x.Id)))
-                progress?.Report(new(SyncPhase.Idle, "파일 동기화 완료", verified.Operation.Path, verified.Operation.Action,
-                    RunId: runId, ActivityId: identities[verified.Id], Event: TransferEvent.Completed));
+            foreach (var finished in jobs.Where(x => x.State == JobState.Completed && identities.ContainsKey(x.Id)))
+                progress?.Report(new(SyncPhase.Idle, "파일 동기화 완료", finished.Operation.Path, finished.Operation.Action,
+                    RunId: runId, ActivityId: identities[finished.Id], Event: TransferEvent.Completed));
             if (jobs.Any(x => x.State is JobState.Pending or JobState.Running or JobState.NeedsReconcile))
             {
                 if (deferred && issues.Count == 0) { Report(new(SyncPhase.Verifying, "사용자 보류", Event: TransferEvent.Held)); return new(false, ["사용자가 중지·취소한 작업이 있습니다."], UserDeferred: true); }

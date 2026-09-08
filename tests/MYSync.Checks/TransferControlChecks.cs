@@ -43,6 +43,21 @@ internal static class TransferControlChecks
             Check(lines[^1].Contains("event-99") && !lines.Any(x => x.Contains("\"event-0\"")), "log did not discard oldest and retain newest");
             SyncDiagnostics.MaxBytes = 1024; SyncDiagnostics.Write("smaller");
             Check(new FileInfo(file).Length <= 1024, "reduced limit not enforced");
+            SyncDiagnostics.MaxBytes = 8192;
+            var compacted = false;
+            for (var i = 0; i < 100; i++)
+            {
+                var oldSize = new FileInfo(file).Length;
+                SyncDiagnostics.Write("capacity-" + i);
+                var newSize = new FileInfo(file).Length;
+                if (newSize >= oldSize) continue;
+                compacted = true;
+                Check(newSize < 8192 * 0.85, "log compaction left no append headroom");
+                SyncDiagnostics.Write("append-after-compaction");
+                Check(new FileInfo(file).Length > newSize, "next log entry recopied the capped log again");
+                break;
+            }
+            Check(compacted, "log compaction test did not reach the cap");
         }
         finally { SyncDiagnostics.DirectoryPath = directory; SyncDiagnostics.MaxBytes = limit; }
         Console.WriteLine("PASS: queued/current per-file controls, unrelated transfer continuation, safe resume, bounded rolling JSONL logs");

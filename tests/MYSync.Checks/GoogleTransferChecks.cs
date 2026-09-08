@@ -20,10 +20,11 @@ internal static class GoogleTransferChecks
     {
         public readonly System.Collections.Concurrent.ConcurrentDictionary<string, Resource> Items = new();
         public int Writes, Trashes, MediaReads;
+        public long MediaBytes;
         public bool Checksums;
         public bool Race, LoseResponse, NoTag, NoV2Tag, Incomplete;
         private int ids = 10;
-        private readonly Dictionary<string, (Resource Item, MemoryStream Data, long Size)> uploads = [];
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, (Resource Item, MemoryStream Data, long Size)> uploads = new();
         public int Chunks, LegacyUploads;
         private static void CheckLegacyMethod(HttpRequestMessage request)
         { if (request.Method != HttpMethod.Put) throw new Exception("v2 upload must use PUT"); }
@@ -62,20 +63,20 @@ internal static class GoogleTransferChecks
                 var uploadId = query["?upload_id=".Length..]; var upload = uploads[uploadId];
                 var range = request.Content!.Headers.ContentRange!;
                 if (range.From != upload.Data.Length || range.Length != upload.Size) throw new Exception("incorrect chunk range");
-                await request.Content.CopyToAsync(upload.Data, ct); Chunks++;
+                await request.Content.CopyToAsync(upload.Data, ct); Interlocked.Increment(ref Chunks);
                 if (upload.Data.Length < upload.Size)
                 {
                     var response = new HttpResponseMessage((HttpStatusCode)308);
                     response.Headers.TryAddWithoutValidation("Range", "bytes=0-" + (upload.Data.Length - 1)); return response;
                 }
                 Items[uploadId] = upload.Item with { Data = upload.Data.ToArray(), Version = upload.Item.Version + 1 };
-                upload.Data.Dispose(); uploads.Remove(uploadId); Writes++; return Json(new { id = uploadId });
+                upload.Data.Dispose(); uploads.TryRemove(uploadId, out _); Interlocked.Increment(ref Writes); return Json(new { id = uploadId });
             }
             var id = path.Split('/').Last(); Items.TryGetValue(id, out var current);
             if (request.Method == HttpMethod.Get)
             {
                 if (current is null) return new(HttpStatusCode.NotFound);
-                if (query.Contains("alt=media")) { MediaReads++; return new(HttpStatusCode.OK) { Content = new ByteArrayContent(current.Data) }; }
+                if (query.Contains("alt=media")) { Interlocked.Increment(ref MediaReads); Interlocked.Add(ref MediaBytes, current.Data.Length); return new(HttpStatusCode.OK) { Content = new ByteArrayContent(current.Data) }; }
                 if (path.Contains("/v2/")) return Json(new { id = current.Id, version = current.Version.ToString(), etag = NoV2Tag ? null : $"\"v{current.Version}\"" });
                 var result = Json(Model(current));
                 if (!NoTag) result.Headers.ETag = new EntityTagHeaderValue($"\"v{current.Version}\"");
@@ -95,7 +96,7 @@ internal static class GoogleTransferChecks
                     current = new(id, body.GetProperty("name").GetString()!, body.GetProperty("parents")[0].GetString()!, "application/octet-stream", [], 0);
                 }
                 if (current is null) return new(HttpStatusCode.NotFound);
-                Items[id] = current with { Data = await parts[1].ReadAsByteArrayAsync(ct), Version = current.Version + 1 }; Writes++;
+                Items[id] = current with { Data = await parts[1].ReadAsByteArrayAsync(ct), Version = current.Version + 1 }; Interlocked.Increment(ref Writes);
                 if (LoseResponse) { LoseResponse = false; throw new HttpRequestException("lost Google upload response"); }
                 return Json(new { id });
             }
@@ -107,7 +108,7 @@ internal static class GoogleTransferChecks
                 return Json(new { id });
             }
             if (request.Method == HttpMethod.Patch && current is not null && (path.Contains("/v2/") ? json.RootElement.GetProperty("labels") : json.RootElement).GetProperty("trashed").GetBoolean())
-            { Items[id] = current with { Trashed = true, Version = current.Version + 1 }; Trashes++; return Json(new { id, trashed = true }); }
+            { Items[id] = current with { Trashed = true, Version = current.Version + 1 }; Interlocked.Increment(ref Trashes); return Json(new { id, trashed = true }); }
             throw new Exception("unexpected Google request");
         }
     }
@@ -194,6 +195,51 @@ internal static class GoogleTransferChecks
         server.LoseResponse = true; writes = server.Writes;
         await executor.RunAsync(retryPair, source, remote);
         Check(server.Writes == writes + 1 && journal.ReadJobs(retryPair).Single().State == JobState.Completed, "Google response loss repeated upload");
+        await CheckPerformance();
         Console.WriteLine("PASS: Google recursive disk roundtrip/update/trash, ETag race and missing-tag protection, unsupported/duplicates, incomplete scans, large chunks and response-loss reconciliation");
     }
+    private static async Task CheckPerformance()
+    {
+        static void Check(bool ok, string message) { if (!ok) throw new Exception(message); }
+        static string Hash(string text) => Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(text)));
+        const int count = 8;
+        foreach (var checksums in new[] { true, false })
+        {
+            var server = new Server { Checksums = checksums };
+            for (var i = 0; i < count; i++) server.Seed("f" + i, "f" + i + ".bin", "root", new string('a', 65536));
+            using var provider = new GoogleDriveProvider((_, _) => Task.FromResult<IGoogleSession>(new Session()), () => server);
+            await provider.ConnectAsync(new Dictionary<string, string> { ["client_id"] = "test.apps.googleusercontent.com", ["client_secret"] = "test" }, default);
+            var remote = provider.OpenEndpoint("root");
+            var initial = await remote.ScanAsync(default);
+            Check(initial.IsComplete && server.MediaReads == (checksums ? 0 : count), "initial scan did not follow checksum fallback");
+            var initialReads = server.MediaReads;
+            for (var repeat = 0; repeat < 3; repeat++) await remote.ScanAsync(default);
+            foreach (var entry in initial.Entries) await ((IFileStateEndpoint)remote).InspectFileAsync(entry.Path, default);
+            Check(server.MediaReads == initialReads, "unchanged version verification downloaded data repeatedly");
+            var changed = new string('b', 65536);
+            foreach (var entry in initial.Entries)
+                await remote.PutFileAsync(entry.Path, entry, new MemoryStream(Encoding.UTF8.GetBytes(changed)), Hash(changed), default);
+            await remote.ScanAsync(default);
+            Check(server.MediaReads == initialReads + (checksums ? 0 : count), "post-upload verification did not avoid redundant media downloads");
+            var before = server.MediaReads;
+            var stale = (await remote.ScanAsync(default)).Entries.Single(x => x.Path == "f0.bin");
+            server.Seed("f0", "f0.bin", "root", "external-new-version");
+            var current = await ((IFileStateEndpoint)remote).InspectFileAsync("f0.bin", default);
+            Check(current?.ContentHash == Hash("external-new-version") && server.MediaReads == before + (checksums ? 0 : 1), "new version reused a stale verified hash");
+            var writes = server.Writes;
+            try
+            {
+                await remote.PutFileAsync("f0.bin", stale, new MemoryStream(Encoding.UTF8.GetBytes("unsafe")), Hash("unsafe"), default);
+                throw new Exception("stale metadata allowed overwrite");
+            }
+            catch (SyncPreconditionException) { }
+            Check(server.Writes == writes, "stale write reached publication");
+            before = server.MediaReads;
+            await using (var content = await remote.OpenReadAsync(current!, default))
+                Check(content.Length == "external-new-version".Length, "real download was skipped");
+            Check(server.MediaReads == before + 1, "OpenRead must fetch actual content even when hash is cached");
+            Console.WriteLine($"PASS: Google performance checksums={checksums}, 8-file scan + 3 repeats + inspections + updates: media GETs={initialReads + (checksums ? 0 : count)}; fresh-version invalidation and stale-write rejection");
+        }
+    }
+
 }

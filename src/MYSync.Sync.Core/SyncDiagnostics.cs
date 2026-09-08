@@ -38,7 +38,9 @@ public static class SyncDiagnostics
                         using (var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                         using (var target = new FileStream(temp, FileMode.Create, FileAccess.Write, FileShare.None))
                         {
-                            var start = Math.Max(0, source.Length - (limit - payload.Length));
+                            // Leave headroom so a full log is not recopied for every HTTP response.
+                            var keep = Math.Min(limit - payload.Length, limit * 3 / 4);
+                            var start = Math.Max(0, source.Length - keep);
                             source.Position = start;
                             if (start > 0) { int c; while ((c = source.ReadByte()) >= 0 && c != 10) { } }
                             source.CopyTo(target); target.Write(payload); target.Flush(true);

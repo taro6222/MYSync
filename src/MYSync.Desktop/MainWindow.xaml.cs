@@ -176,6 +176,7 @@ public partial class MainWindow : Window
         new Progress<SyncProgress>(report =>
         {
             model.History.Apply(pair.Id, pair.RemoteFolderName, report);
+            if (report.Path is null) StatusText.Text = pair.RemoteFolderName + " · " + report.Message;
             if (report.Event != TransferEvent.None || report.Phase is SyncPhase.Idle or SyncPhase.Attention)
             { using var scope = SyncDiagnostics.BeginJob(pair.Id, 0); SyncDiagnostics.Write("transfer.state", phase: report.Phase + "/" + report.Event, bytes: report.Bytes); }
             if (notify && report.Phase == SyncPhase.Attention && report.ActivityId == Guid.Empty) AddAlert(pair, report.Message);
@@ -318,13 +319,14 @@ public partial class MainWindow : Window
                     finally { values.Clear(); }
                     remote = new PolicyEndpoint(transfer.OpenEndpoint(pair.RemoteFolderId), policy);
                 }
-                var left = await local.ScanAsync(ct); var right = await remote.ScanAsync(ct);
+                var snapshots = await SyncSnapshots.ReadAsync(local, remote, ct);
+                var left = snapshots.Local; var right = snapshots.Remote;
                 if (left.IsComplete && right.IsComplete) journal.CommitVerifiedPaths(pair.Id, left, right);
                 var plan = SyncPlanner.Compare(left, right, journal.ReadBaseline(pair.Id));
                 if (!plan.CanExecute)
                 { progress.Report(new SyncProgress(SyncPhase.Attention, string.Join(" / ", plan.Errors))); return new ExecutionReport(false, plan.Errors); }
                 journal.RefreshPlan(pair.Id, plan);
-                return await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, ct, progress, fileControl);
+                return await new SyncExecutor(journal).RunAsync(pair.Id, local, remote, ct, progress, fileControl, initialSnapshots: snapshots);
             });
             var run = new AutoRun(monitor, session, runLock);
             monitor.StatusChanged += status => Dispatcher.BeginInvoke(new Action(() =>
