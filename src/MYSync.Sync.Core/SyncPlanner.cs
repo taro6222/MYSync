@@ -78,7 +78,7 @@ public static class SyncPlanner
     }
     private static bool IsChild(string path, string parent) => path.StartsWith(parent + "/", StringComparison.OrdinalIgnoreCase);
     /// <summary>Names Windows cannot store. Such an item is reported rather than planned, so one of them never blocks the pair.</summary>
-    private static bool Representable(string path) => path.Split('/').All(segment =>
+    private static bool Representable(string path) => path.Split('/').All(segment => !segment.Equals(".MYSync-recovery", StringComparison.OrdinalIgnoreCase) &&
         segment.Length > 0 && !segment.EndsWith('.') && !segment.EndsWith(' ')
         && segment.IndexOfAny(Path.GetInvalidFileNameChars()) < 0 && !IsDeviceName(segment));
     private static bool IsDeviceName(string name)

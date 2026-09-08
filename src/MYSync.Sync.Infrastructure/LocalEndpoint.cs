@@ -171,7 +171,7 @@ public sealed class LocalEndpoint : ISyncEndpoint
     private string Resolve(string relative)
     {
         var parts = relative.Split('/');
-        if (string.IsNullOrWhiteSpace(relative) || parts.Any(p => p is "" or "." or ".." || p.EndsWith('.') || p.EndsWith(' ') || p.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || IsDeviceName(p)))
+        if (string.IsNullOrWhiteSpace(relative) || parts.Any(p => p.Equals(".MYSync-recovery", StringComparison.OrdinalIgnoreCase) || p is "" or "." or ".." || p.EndsWith('.') || p.EndsWith(' ') || p.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 || IsDeviceName(p)))
             throw new SyncPreconditionException("지원하지 않는 상대 경로: " + relative);
         var full = Path.GetFullPath(Path.Combine(root, Path.Combine(parts)));
         if (!Contains(root, full) || full == root) throw new SyncPreconditionException("루트 외부 경로");

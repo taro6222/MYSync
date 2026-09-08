@@ -37,6 +37,8 @@ public sealed class LocalScanner(IDictionary<string, FileFingerprint>? cache = n
                     {
                         var attributes = File.GetAttributes(path);
                         var relative = Path.GetRelativePath(root, path).Replace('\\', '/');
+                        if (Path.GetFileName(path).Equals(".MYSync-recovery", StringComparison.OrdinalIgnoreCase))
+                        { unsupported.Add(new(relative, "MYSync 복구 보관함은 동기화하지 않습니다.")); continue; }
                         // Reported, not an error: one link must not stop the whole pair, and its target is never followed.
                         if ((attributes & FileAttributes.ReparsePoint) != 0) { unsupported.Add(new(relative, "링크·정션은 동기화하지 않습니다.")); continue; }
                         if ((attributes & FileAttributes.Directory) != 0)

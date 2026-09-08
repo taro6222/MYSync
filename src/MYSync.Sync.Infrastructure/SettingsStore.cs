@@ -34,6 +34,14 @@ public sealed class SettingsStore
         command.Parameters.AddWithValue("$account", (object?)pair.AccountId?.ToString() ?? DBNull.Value);
         command.ExecuteNonQuery();
     }
+    public void Delete(Guid id)
+    {
+        using var connection = Open();
+        using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM SyncPairs WHERE Id=$id";
+        command.Parameters.AddWithValue("$id", id.ToString());
+        command.ExecuteNonQuery();
+    }
     public IReadOnlyList<SyncPair> Load()
     {
         using var connection = Open();
